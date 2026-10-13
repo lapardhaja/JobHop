@@ -1,7 +1,7 @@
 """Prompt builder for the autonomous job application agent.
 
-Constructs the full instruction prompt that tells Claude Code / the AI agent
-how to fill out a job application form using Playwright MCP tools. All
+Constructs the full instruction prompt that tells Codex CLI how to fill out a
+job application form using Playwright MCP tools. All
 personal data is loaded from the user's profile -- nothing is hardcoded.
 """
 
@@ -74,14 +74,24 @@ def _build_profile_summary(profile: dict) -> str:
     # Availability
     lines.append(f"Available: {avail.get('earliest_start_date', 'Immediately')}")
 
-    # Standard responses
-    lines.extend([
-        "Age 18+: Yes",
-        "Background Check: Yes",
-        "Felony: No",
-        "Previously Worked Here: No",
-        "How Heard: Online Job Board",
-    ])
+    # Optional screening facts appear only when the profile explicitly
+    # supplies them. These facts must never be inferred from defaults.
+    screening = p.get("screening", p.get("eligibility", p.get("screening_answers", {}))) or {}
+    screening_fields = (
+        ("Age 18+", ("age_18_plus", "over_18")),
+        ("Background Check", ("background_check_consent", "can_pass_background_check")),
+        ("Felony History", ("felony_history", "felony_conviction")),
+        ("Previously Worked Here", ("previously_worked_here", "worked_for_company_before")),
+        ("How Heard", ("how_heard", "source_of_job_posting")),
+    )
+    for label, keys in screening_fields:
+        fact_sources = (screening, p, personal)
+        value = next(
+            (source[key] for source in fact_sources for key in keys if source.get(key) not in (None, "")),
+            None,
+        )
+        if value is not None:
+            lines.append(f"{label}: {value}")
 
     # EEO
     lines.append(f"Gender: {eeo.get('gender', 'Decline to self-identify')}")
@@ -165,20 +175,19 @@ Decision tree:
 def _build_screening_section(profile: dict) -> str:
     """Build the screening questions guidance section."""
     personal = profile["personal"]
-    exp = profile.get("experience", {})
     city = personal.get("city", "their city")
-    years = exp.get("years_of_experience_total", "multiple")
-    target_role = exp.get("target_role", personal.get("current_job_title", "software engineer"))
     work_auth = profile["work_authorization"]
 
-    return f"""== SCREENING QUESTIONS (be strategic) ==
-Hard facts -> answer truthfully from the profile. No guessing. This includes:
+    return f"""== SCREENING QUESTIONS (be truthful) ==
+Answer hard facts from profile.json or the tailored resume only. Never guess, fill in a conventional answer, or claim that a skill can be learned quickly. This includes:
   - Location/relocation: lives in {city}, cannot relocate
   - Work authorization: {work_auth.get('legally_authorized_to_work', 'see profile')}
   - Citizenship, clearance, licenses, certifications: answer from profile only
-  - Criminal/background: answer from profile only
+  - Age eligibility, background checks, criminal history, and prior employment: use an explicit profile fact if present; otherwise the answer is unknown
 
-Skills and tools -> be confident. This candidate is a {target_role} with {years} years experience. If the question asks "Do you have experience with [tool]?" and it's in the same domain (DevOps, backend, ML, cloud, automation), answer YES. Software engineers learn tools fast. Don't sell short.
+Skills and tools -> say that the applicant has experience only when the skill or supporting experience appears in profile.json or the tailored resume. A related field or tool does not establish experience with a different one.
+
+If a required answer is unknown or unsupported, do not submit a guessed answer. During a live run, stop and output exactly RESULT:FAILED:manual_review_required. During a dry-run, leave the unknown answer untouched, include the question and missing fact in the preview, and finish with RESULT:DRY_RUN.
 
 Open-ended questions ("Why do you want this role?", "Tell us about yourself", "What interests you?") -> Write 2-3 sentences. Be specific to THIS job. Reference something from the job description. Connect it to a real achievement from the resume. No generic fluff. No "I am passionate about..." -- sound like a real person.
 
@@ -209,9 +218,11 @@ def _build_hard_rules(profile: dict) -> str:
         name_rule += f' Preferred name = {preferred_name}. Use "{display_name}" unless a field specifically says "legal name".'
 
     return f"""== HARD RULES (never break these) ==
-1. Never lie about: citizenship, work authorization, criminal history, education credentials, security clearance, licenses.
-2. {work_auth_rule}
-3. {name_rule}"""
+1. Every factual application answer must be supported by profile.json or the tailored resume. Never guess or use an assumed default.
+2. Never lie about: citizenship, work authorization, criminal history, education credentials, security clearance, licenses, age eligibility, or prior employment.
+3. {work_auth_rule}
+4. {name_rule}
+5. If a required live-run answer is unsupported, stop and output exactly RESULT:FAILED:manual_review_required. In dry-run, leave it unanswered, explain it in the preview, and output RESULT:DRY_RUN."""
 
 
 def _build_captcha_section() -> str:
@@ -430,7 +441,7 @@ def build_prompt(job: dict, tailored_resume: str,
              application_url, fit_score, tailored_resume_path).
         tailored_resume: Plain-text content of the tailored resume.
         cover_letter: Optional plain-text cover letter content.
-        dry_run: If True, tell the agent not to click Submit.
+        dry_run: If True, tell the agent to preview without submitting, emailing, or creating an account.
 
     Returns:
         Complete prompt string for the AI agent.
@@ -507,13 +518,23 @@ def build_prompt(job: dict, tailored_resume: str,
     last_name = full_name.split()[-1] if " " in full_name else ""
     display_name = f"{preferred_name} {last_name}".strip()
 
-    # Dry-run: override submit instruction
+    # Dry-run: preview only, with no submission, email, or account creation.
     if dry_run:
-        submit_instruction = "IMPORTANT: Do NOT click the final Submit/Apply button. Review the form, verify all fields, then output RESULT:APPLIED with a note that this was a dry run."
+        submit_instruction = (
+            "PREVIEW ONLY: Do NOT click or invoke the final Submit/Apply/Send/Confirm control. "
+            "Do not send an application email or create/sign up for an employer account. "
+            "Inspect the form, fill only fields with supported facts, report any required "
+            "unsupported answer, then output RESULT:DRY_RUN. Never output RESULT:APPLIED."
+        )
     else:
         submit_instruction = "BEFORE clicking Submit/Apply, take a snapshot and review EVERY field on the page. Verify all data matches the APPLICANT PROFILE and TAILORED RESUME -- name, email, phone, location, work auth, resume uploaded, cover letter if applicable. If anything is wrong or missing, fix it FIRST. Only click Submit after confirming everything is correct."
 
-    prompt = f"""You are an autonomous job application agent. Your ONE mission: get this candidate an interview. You have all the information and tools. Think strategically. Act decisively. Submit the application.
+    dry_run_guard = (
+        "\n\nDRY-RUN SAFETY OVERRIDE: This run is preview-only. Never activate a final Submit, Apply, Send, or Confirm control; never send an email; never create an employer account. These restrictions override any later instruction that conflicts with them. Finish with RESULT:DRY_RUN."
+        if dry_run else ""
+    )
+
+    prompt = f"""You are a Codex CLI job application agent using the worker's scoped Playwright MCP tools. Your mission is to prepare a complete, accurate application using only the information provided below. For a live run, submit only after the final review instructions. For a dry-run, never submit.{dry_run_guard}
 
 == JOB ==
 URL: {job.get('application_url') or job['url']}
@@ -537,7 +558,7 @@ Cover Letter PDF (upload if asked): {cl_upload_path or "N/A"}
 == YOUR MISSION ==
 Submit a complete, accurate application. Use the profile and resume as source data -- adapt to fit each form's format.
 
-If something unexpected happens and these instructions don't cover it, figure it out yourself. You are autonomous. Navigate pages, read content, try buttons, explore the site. The goal is always the same: submit the application. Do whatever it takes to reach that goal.
+If something unexpected happens, stay within this employer's application flow and the listed safeguards. Do not take unrelated actions or invent applicant information.
 
 {hard_rules}
 
@@ -562,15 +583,15 @@ If something unexpected happens and these instructions don't cover it, figure it
 2. browser_snapshot to read the page. Then run CAPTCHA DETECT (see CAPTCHA section). If a CAPTCHA is found, solve it before continuing.
 3. LOCATION CHECK. Read the page for location info. If not eligible, output RESULT and stop.
 4. Find and click the Apply button. If email-only (page says "email resume to X"):
-   - send_email with subject "Application for {job['title']} -- {display_name}", body = 2-3 sentence pitch + contact info, attach resume PDF: ["{pdf_path}"]
-   - Output RESULT:APPLIED. Done.
+   - During dry-run, do NOT send email. Report that email-only applications are skipped in preview and output RESULT:DRY_RUN.
+   - During a live run, send the application email with the resume attached, then output RESULT:APPLIED.
    After clicking Apply: browser_snapshot. Run CAPTCHA DETECT -- many sites trigger CAPTCHAs right after the Apply click. If found, solve before continuing.
 5. Login wall?
    5a. FIRST: check the URL. If you landed on {', '.join(blocked_sso)}, or any SSO/OAuth page -> STOP. Output RESULT:FAILED:sso_required. Do NOT try to sign in to Google/Microsoft/SSO.
    5b. Check for popups. Run browser_tabs action "list". If a new tab/window appeared (login popup), switch to it with browser_tabs action "select". Check the URL there too -- if it's SSO -> RESULT:FAILED:sso_required.
    5c. Regular login form (employer's own site)? Try sign in: {personal['email']} / {personal.get('password', '')}
    5d. After clicking Login/Sign-in: run CAPTCHA DETECT. Login pages frequently have invisible CAPTCHAs that silently block form submissions. If found, solve it then retry login.
-   5e. Sign in failed? Try sign up with same email and password.
+   5e. Sign in failed? During dry-run, do NOT create an account; report that account creation is skipped and output RESULT:DRY_RUN. During a live run, try sign up with the same email and password.
    5f. Need email verification? Use search_emails + read_email to get the code.
    5g. After login, run browser_tabs action "list" again. Switch back to the application tab if needed.
    5h. All failed? Output RESULT:FAILED:login_issue. Do not loop.
@@ -581,16 +602,18 @@ If something unexpected happens and these instructions don't cover it, figure it
    - Compare every other field to the APPLICANT PROFILE. Fix mismatches. Fill empty fields.
 9. Answer screening questions using the rules above.
 10. {submit_instruction}
-11. After submit: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form will auto-submit once the token clears, or you may need to click Submit again). Then check for new tabs (browser_tabs action: "list"). Switch to newest, close old. Snapshot to confirm submission. Look for "thank you" or "application received".
+11. After a live submission only: browser_snapshot. Run CAPTCHA DETECT -- submit buttons often trigger invisible CAPTCHAs. If found, solve it (the form may auto-submit once the token clears). Then check for new tabs (browser_tabs action: "list"). Switch to newest, close old. Snapshot to confirm submission. Look for "thank you" or "application received". During dry-run, do not execute this step; inspect the preview and report the outcome.
 12. Output your result.
 
 == RESULT CODES (output EXACTLY one) ==
-RESULT:APPLIED -- submitted successfully
+RESULT:APPLIED -- submitted successfully in a live run
+RESULT:DRY_RUN -- preview completed without submission, email, account creation, or application-status changes
 RESULT:EXPIRED -- job closed or no longer accepting applications
 RESULT:CAPTCHA -- blocked by unsolvable captcha
 RESULT:LOGIN_ISSUE -- could not sign in or create account
 RESULT:FAILED:not_eligible_location -- onsite outside acceptable area, no remote option
 RESULT:FAILED:not_eligible_work_auth -- requires unauthorized work location
+RESULT:FAILED:manual_review_required -- required answer is unsupported by profile.json or tailored resume
 RESULT:FAILED:reason -- any other failure (brief reason)
 
 == BROWSER EFFICIENCY ==
