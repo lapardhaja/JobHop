@@ -4,12 +4,13 @@ Interactive flow that creates ~/.applypilot/ with:
   - resume.txt (and optionally resume.pdf)
   - profile.json
   - searches.yaml
-  - .env (LLM API key)
+  - .env (Codex/API backend settings)
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -233,11 +234,47 @@ def _setup_searches() -> None:
 # AI Features
 # ---------------------------------------------------------------------------
 
+def _stored_env_values() -> dict[str, str]:
+    """Read saved settings without printing or logging secret values."""
+    from dotenv import dotenv_values
+
+    return {key: str(value) for key, value in dotenv_values(ENV_PATH).items() if value is not None}
+
+
+def _update_env_file(updates: dict[str, str | None]) -> None:
+    """Update backend settings while preserving unrelated .env entries."""
+    existing = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else [
+        "# ApplyPilot configuration",
+    ]
+    assignment = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
+    output: list[str] = []
+    written: set[str] = set()
+
+    for line in existing:
+        match = assignment.match(line)
+        key = match.group(1) if match else None
+        if key not in updates:
+            output.append(line)
+            continue
+        if key in written:
+            continue
+        written.add(key)
+        value = updates[key]
+        if value is not None:
+            output.append(f"{key}={value}")
+
+    for key, value in updates.items():
+        if key not in written and value is not None:
+            output.append(f"{key}={value}")
+
+    ENV_PATH.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+
 def _setup_ai_features() -> None:
-    """Ask about AI scoring/tailoring — optional LLM configuration."""
+    """Ask about AI scoring/tailoring and configure its selected backend."""
     console.print(Panel(
         "[bold]Step 4: AI Features (optional)[/bold]\n"
-        "An LLM powers job scoring, resume tailoring, and cover letters.\n"
+        "Codex powers job scoring, resume tailoring, and cover letters by default.\n"
         "Without this, you can still discover and enrich jobs."
     ))
 
@@ -245,33 +282,49 @@ def _setup_ai_features() -> None:
         console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
         return
 
-    console.print("Supported providers: [bold]Gemini[/bold] (recommended, free tier), OpenAI, local (Ollama/llama.cpp)")
-    provider = Prompt.ask(
-        "Provider",
-        choices=["gemini", "openai", "local"],
-        default="gemini",
-    )
+    env_values = _stored_env_values()
+    backend = Prompt.ask("Text backend", choices=["codex", "api"], default="codex").strip().lower()
+    updates: dict[str, str | None] = {"APPLYPILOT_AI_PROVIDER": backend}
 
-    env_lines = ["# ApplyPilot configuration", ""]
+    if backend == "codex":
+        model = Prompt.ask(
+            "Codex model (leave blank for the Codex CLI default)",
+            default=env_values.get("CODEX_MODEL", ""),
+        ).strip()
+        updates["CODEX_MODEL"] = model or None
+    else:
+        console.print(
+            "API providers are used only while APPLYPILOT_AI_PROVIDER=api. "
+            "Codex remains the default backend."
+        )
+        choices = ["gemini", "openai", "local"]
+        saved_provider = env_values.get("APPLYPILOT_API_PROVIDER", "")
+        default_provider = saved_provider if saved_provider in choices else "gemini"
+        api_provider = Prompt.ask("API provider", choices=choices, default=default_provider).strip().lower()
+        updates["APPLYPILOT_API_PROVIDER"] = api_provider
 
-    if provider == "gemini":
-        api_key = Prompt.ask("Gemini API key (from aistudio.google.com)")
-        model = Prompt.ask("Model", default="gemini-2.0-flash")
-        env_lines.append(f"GEMINI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
-    elif provider == "openai":
-        api_key = Prompt.ask("OpenAI API key")
-        model = Prompt.ask("Model", default="gpt-4o-mini")
-        env_lines.append(f"OPENAI_API_KEY={api_key}")
-        env_lines.append(f"LLM_MODEL={model}")
-    elif provider == "local":
-        url = Prompt.ask("Local LLM endpoint URL", default="http://localhost:8080/v1")
-        model = Prompt.ask("Model name", default="local-model")
-        env_lines.append(f"LLM_URL={url}")
-        env_lines.append(f"LLM_MODEL={model}")
+        if api_provider in {"gemini", "openai"}:
+            key_name = "GEMINI_API_KEY" if api_provider == "gemini" else "OPENAI_API_KEY"
+            provider_name = "Gemini" if api_provider == "gemini" else "OpenAI"
+            saved_key = env_values.get(key_name, "")
+            if saved_key and Confirm.ask(f"Keep the saved {provider_name} API key?", default=True):
+                api_key = saved_key
+            else:
+                api_key = Prompt.ask(f"{provider_name} API key", password=True)
+            default_model = "gemini-2.0-flash" if api_provider == "gemini" else "gpt-4o-mini"
+            model = Prompt.ask("Model", default=env_values.get("LLM_MODEL", default_model)).strip()
+            updates[key_name] = api_key
+            updates["LLM_MODEL"] = model
+        else:
+            url = Prompt.ask(
+                "Local API-compatible endpoint URL",
+                default=env_values.get("LLM_URL", "http://localhost:8080/v1"),
+            ).strip()
+            model = Prompt.ask("Model name", default=env_values.get("LLM_MODEL", "local-model")).strip()
+            updates["LLM_URL"] = url
+            updates["LLM_MODEL"] = model
 
-    env_lines.append("")
-    ENV_PATH.write_text("\n".join(env_lines), encoding="utf-8")
+    _update_env_file(updates)
     console.print(f"[green]AI configuration saved to {ENV_PATH}[/green]")
 
 
@@ -280,26 +333,43 @@ def _setup_ai_features() -> None:
 # ---------------------------------------------------------------------------
 
 def _setup_auto_apply() -> None:
-    """Configure autonomous job application (requires Claude Code CLI)."""
+    """Configure autonomous job application (requires Codex CLI)."""
     console.print(Panel(
         "[bold]Step 5: Auto-Apply (optional)[/bold]\n"
         "ApplyPilot can autonomously fill and submit job applications\n"
-        "using Claude Code as the browser agent."
+        "using Codex CLI as the browser agent."
     ))
 
     if not Confirm.ask("Enable autonomous job applications?", default=True):
         console.print("[dim]You can apply manually using the tailored resumes ApplyPilot generates.[/dim]")
         return
 
-    # Check for Claude Code CLI
-    if shutil.which("claude"):
-        console.print("[green]Claude Code CLI detected.[/green]")
+    # Check Codex CLI and the browser runtime.
+    from applypilot.codex import codex_login_status, find_codex_cli
+
+    codex_bin = find_codex_cli()
+    if codex_bin:
+        signed_in, _message = codex_login_status(codex_bin)
+        if signed_in:
+            console.print(f"[green]Codex CLI detected and signed in.[/green] [dim]{codex_bin}[/dim]")
+        else:
+            console.print("[yellow]Codex CLI is installed but not signed in.[/yellow] Run [bold]codex login[/bold].")
     else:
         console.print(
-            "[yellow]Claude Code CLI not found on PATH.[/yellow]\n"
-            "Install it from: [bold]https://claude.ai/code[/bold]\n"
-            "Auto-apply won't work until Claude Code is installed."
+            "[yellow]Codex CLI not found on PATH.[/yellow]\n"
+            "Install Codex CLI and sign in with [bold]codex login[/bold].\n"
+            "Auto-apply won't work until Codex CLI is installed and signed in."
         )
+    try:
+        from applypilot.config import get_chrome_path
+        get_chrome_path()
+        console.print("[green]Chrome/Chromium detected.[/green]")
+    except FileNotFoundError:
+        console.print("[yellow]Chrome/Chromium is required for auto-apply.[/yellow]")
+    if shutil.which("npx"):
+        console.print("[green]Node.js/npx detected.[/green]")
+    else:
+        console.print("[yellow]Node.js 18+ and npx are required for the Playwright browser tools.[/yellow]")
 
     # Optional: CapSolver for CAPTCHAs
     console.print("\n[dim]Some job sites use CAPTCHAs. CapSolver can handle them automatically.[/dim]")
@@ -352,11 +422,11 @@ def run_wizard() -> None:
     _setup_searches()
     console.print()
 
-    # Step 4: AI features (optional LLM)
+    # Step 4: AI features (optional)
     _setup_ai_features()
     console.print()
 
-    # Step 5: Auto-apply (Claude Code detection)
+    # Step 5: Auto-apply (Codex CLI detection)
     _setup_auto_apply()
     console.print()
 
@@ -378,9 +448,9 @@ def run_wizard() -> None:
 
     unlock_hint = ""
     if tier == 1:
-        unlock_hint = "\n[dim]To unlock Tier 2: configure an LLM API key (re-run [bold]applypilot init[/bold]).[/dim]"
+        unlock_hint = "\n[dim]To unlock Tier 2: sign in to Codex CLI or select API mode and configure a provider.[/dim]"
     elif tier == 2:
-        unlock_hint = "\n[dim]To unlock Tier 3: install Claude Code CLI + Chrome.[/dim]"
+        unlock_hint = "\n[dim]To unlock Tier 3: sign in to Codex CLI and install Chrome + Node.js/npx.[/dim]"
 
     console.print(
         Panel.fit(

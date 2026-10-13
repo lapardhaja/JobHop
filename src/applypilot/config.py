@@ -237,6 +237,15 @@ def get_ai_provider() -> str:
 
 def _api_backend_configured() -> bool:
     """Whether the explicit API backend has at least one configured provider."""
+    provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
+    if provider == "gemini":
+        return bool(os.environ.get("GEMINI_API_KEY"))
+    if provider == "openai":
+        return bool(os.environ.get("OPENAI_API_KEY"))
+    if provider == "local":
+        return bool(os.environ.get("LLM_URL"))
+    if provider:
+        return False
     return any(os.environ.get(key) for key in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
 
 

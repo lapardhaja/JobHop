@@ -385,6 +385,7 @@ def doctor() -> None:
     has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
     has_local = bool(os.environ.get("LLM_URL"))
+    api_provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
     try:
         provider = app_config.get_ai_provider()
     except ValueError as exc:
@@ -395,7 +396,19 @@ def doctor() -> None:
         model = os.environ.get("CODEX_MODEL") or "Codex CLI default"
         results.append(("AI backend", ok_mark, f"Codex CLI ({model})"))
     elif provider == "api":
-        if has_gemini and not has_local:
+        if api_provider == "gemini" and has_gemini:
+            model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+            results.append(("API backend", ok_mark, f"Gemini ({model}); API key configured"))
+        elif api_provider == "openai" and has_openai:
+            model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+            results.append(("API backend", ok_mark, f"OpenAI ({model}); API key configured"))
+        elif api_provider == "local" and has_local:
+            model = os.environ.get("LLM_MODEL", "local-model")
+            results.append(("API backend", ok_mark, f"Local API-compatible provider ({model}) configured"))
+        elif api_provider:
+            results.append(("API backend", fail_mark,
+                            f"{api_provider} API provider is selected but its configuration is missing or invalid"))
+        elif has_gemini and not has_local:
             model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
             results.append(("API backend", ok_mark, f"Gemini ({model}); API key configured"))
         elif has_openai and not has_local:

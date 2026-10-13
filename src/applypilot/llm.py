@@ -28,6 +28,33 @@ def _detect_provider() -> tuple[str, str, str]:
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     local_url = os.environ.get("LLM_URL", "")
     model_override = os.environ.get("LLM_MODEL", "")
+    api_provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
+
+    if api_provider and api_provider not in {"gemini", "openai", "local"}:
+        raise RuntimeError(
+            "Invalid APPLYPILOT_API_PROVIDER value. Choose 'gemini', 'openai', or 'local'."
+        )
+
+    if api_provider == "gemini":
+        if not gemini_key:
+            raise RuntimeError("APPLYPILOT_API_PROVIDER=gemini requires GEMINI_API_KEY.")
+        return (
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            model_override or "gemini-2.0-flash",
+            gemini_key,
+        )
+    if api_provider == "openai":
+        if not openai_key:
+            raise RuntimeError("APPLYPILOT_API_PROVIDER=openai requires OPENAI_API_KEY.")
+        return "https://api.openai.com/v1", model_override or "gpt-4o-mini", openai_key
+    if api_provider == "local":
+        if not local_url:
+            raise RuntimeError("APPLYPILOT_API_PROVIDER=local requires LLM_URL.")
+        return (
+            local_url.rstrip("/"),
+            model_override or "local-model",
+            os.environ.get("LLM_API_KEY", ""),
+        )
 
     if gemini_key and not local_url:
         return (
