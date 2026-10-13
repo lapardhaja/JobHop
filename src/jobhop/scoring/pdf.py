@@ -5,11 +5,31 @@ and exports to PDF using headless Chromium via Playwright.
 """
 
 import logging
+import re
+from html import escape
 from pathlib import Path
 
 from jobhop.config import TAILORED_DIR
 
 log = logging.getLogger(__name__)
+
+
+def _is_section_heading(line: str) -> bool:
+    stripped = line.strip()
+    section_terms = (
+        "SUMMARY", "SKILL", "EXPERIENCE", "PROJECT", "EDUCATION", "CERTIFICATION",
+        "PUBLICATION", "AWARD", "HONOR", "VOLUNTEER", "ACHIEVEMENT", "LEADERSHIP",
+        "ACTIVITIES", "ADDITIONAL",
+    )
+    return bool(
+        len(stripped) > 3
+        and stripped == stripped.upper()
+        and any(char.isalpha() for char in stripped)
+        and any(term in stripped for term in section_terms)
+        and not stripped.startswith(("•", "●", "▪", "-"))
+        and ":" not in stripped
+        and "|" not in stripped
+    )
 
 
 # ── Resume Parser ────────────────────────────────────────────────────────
@@ -28,15 +48,9 @@ def parse_resume(text: str) -> dict:
     """
     lines = [line.rstrip() for line in text.strip().split("\n")]
 
-    # Header: first few lines before SUMMARY
-    header_lines: list[str] = []
-    body_start = 0
-    for i, line in enumerate(lines):
-        if line.strip().upper() == "SUMMARY":
-            body_start = i
-            break
-        if line.strip():
-            header_lines.append(line.strip())
+    # The first recognized uppercase section heading ends the contact header.
+    body_start = next((i for i, line in enumerate(lines) if _is_section_heading(line)), len(lines))
+    header_lines = [line.strip() for line in lines[:body_start] if line.strip()]
 
     name = header_lines[0] if len(header_lines) > 0 else ""
     title = header_lines[1] if len(header_lines) > 1 else ""
@@ -61,13 +75,7 @@ def parse_resume(text: str) -> dict:
     for line in lines[body_start:]:
         stripped = line.strip()
         # Detect section headers (all caps, no leading dash/bullet, longer than 3 chars)
-        if (
-            stripped
-            and stripped == stripped.upper()
-            and not stripped.startswith("-")
-            and len(stripped) > 3
-            and not stripped.startswith("\u2022")
-        ):
+        if _is_section_heading(stripped):
             if current_section:
                 sections[current_section] = "\n".join(current_lines).strip()
             current_section = stripped
@@ -122,12 +130,11 @@ def parse_entries(text: str) -> list[dict]:
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith("- ") or stripped.startswith("\u2022 "):
+        if re.match(r"^[•●▪-]\s+", stripped):
             if current:
-                current["bullets"].append(stripped[2:].strip())
+                current["bullets"].append(re.sub(r"^[•●▪-]\s+", "", stripped).strip())
         elif current is None or (
-            not stripped.startswith("-")
-            and not stripped.startswith("\u2022")
+            not re.match(r"^[•●▪-]", stripped)
             and len(current.get("bullets", [])) > 0
         ):
             # New entry
@@ -146,196 +153,97 @@ def parse_entries(text: str) -> list[dict]:
     return entries
 
 
+def _format_entry_label(value: str) -> str:
+    """Add display-only separators where PDF text extraction joined adjacent columns."""
+    month = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
+    value = re.sub(rf"(?<=[A-Za-z0-9])(?={month}\s+\d{{4}}\b)", " | ", value)
+    value = re.sub(r"(?<=[A-Za-z0-9])(?=(?:19|20)\d{2}\b(?:\s|$))", " | ", value)
+    value = re.sub(r"(?<=[A-Za-z])(?=(?:Remote|Hybrid|On-site)\b)", " | ", value)
+    value = re.sub(
+        r"(?<=[A-Za-z])(?=[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*,\s+(?:[A-Z]{2}|[A-Z][a-z]+)\b)",
+        " | ", value,
+    )
+    return re.sub(r"\s{2,}", " ", value).strip()
+
+
 # ── HTML Template ────────────────────────────────────────────────────────
 
 def build_html(resume: dict) -> str:
-    """Build professional resume HTML from parsed data.
+    """Render every source section, in order, with escaped text and multi-page flow."""
+    def inline_text(value: str) -> str:
+        return escape(value, quote=True)
 
-    Args:
-        resume: Parsed resume dict from parse_resume().
+    rendered_sections: list[str] = []
+    for heading, content in resume["sections"].items():
+        normalized = heading.upper()
+        safe_heading = inline_text(heading)
+        section_class = "section page-break-before" if normalized == "RESEARCH EXPERIENCE" else "section"
+        if "SKILL" in normalized:
+            rows = parse_skills(content)
+            body = "".join(
+                f'<div class="skill-row"><span class="skill-cat">{inline_text(category)}:</span> '
+                f'{inline_text(value)}</div>'
+                for category, value in rows
+            )
+            if not body:
+                body = f'<div class="plain">{inline_text(content).replace(chr(10), "<br>")}</div>'
+        elif "EXPERIENCE" in normalized or normalized == "PROJECTS":
+            entries = parse_entries(content)
+            body_parts: list[str] = []
+            for entry in entries:
+                subtitle = (
+                    f'<div class="entry-subtitle">{inline_text(_format_entry_label(entry["subtitle"]))}</div>'
+                    if entry["subtitle"] else ""
+                )
+                bullets = "".join(f"<li>{inline_text(bullet)}</li>" for bullet in entry["bullets"])
+                body_parts.append(
+                    f'<div class="entry"><div class="entry-title">{inline_text(_format_entry_label(entry["title"]))}</div>'
+                    f'{subtitle}<ul>{bullets}</ul></div>'
+                )
+            body = "".join(body_parts) or f'<div class="plain">{inline_text(content).replace(chr(10), "<br>")}</div>'
+        else:
+            safe_lines = [
+                inline_text(_format_entry_label(line.strip()))
+                for line in content.splitlines() if line.strip()
+            ]
+            if "SUMMARY" in normalized:
+                body = f'<div class="summary">{"<br>".join(safe_lines)}</div>'
+            else:
+                body = f'<div class="plain">{"<br>".join(safe_lines)}</div>'
+        rendered_sections.append(
+            f'<section class="{section_class}"><div class="section-title">{safe_heading}</div>{body}</section>'
+        )
 
-    Returns:
-        Complete HTML string ready for PDF rendering.
-    """
-    sections = resume["sections"]
-
-    # Skills
-    skills_html = ""
-    if "TECHNICAL SKILLS" in sections:
-        skills = parse_skills(sections["TECHNICAL SKILLS"])
-        rows = ""
-        for cat, val in skills:
-            rows += f'<div class="skill-row"><span class="skill-cat">{cat}:</span> {val}</div>\n'
-        skills_html = f'<div class="section"><div class="section-title">Technical Skills</div>{rows}</div>'
-
-    # Experience
-    exp_html = ""
-    if "EXPERIENCE" in sections:
-        entries = parse_entries(sections["EXPERIENCE"])
-        items = ""
-        for e in entries:
-            bullets = "".join(f"<li>{b}</li>" for b in e["bullets"])
-            subtitle = f'<div class="entry-subtitle">{e["subtitle"]}</div>' if e["subtitle"] else ""
-            items += f'<div class="entry"><div class="entry-title">{e["title"]}</div>{subtitle}<ul>{bullets}</ul></div>'
-        exp_html = f'<div class="section"><div class="section-title">Experience</div>{items}</div>'
-
-    # Projects
-    proj_html = ""
-    if "PROJECTS" in sections:
-        entries = parse_entries(sections["PROJECTS"])
-        items = ""
-        for e in entries:
-            bullets = "".join(f"<li>{b}</li>" for b in e["bullets"])
-            subtitle = f'<div class="entry-subtitle">{e["subtitle"]}</div>' if e["subtitle"] else ""
-            items += f'<div class="entry"><div class="entry-title">{e["title"]}</div>{subtitle}<ul>{bullets}</ul></div>'
-        proj_html = f'<div class="section"><div class="section-title">Projects</div>{items}</div>'
-
-    # Education
-    edu_html = ""
-    if "EDUCATION" in sections:
-        edu_text = sections["EDUCATION"].strip()
-        edu_html = f'<div class="section"><div class="section-title">Education</div><div class="edu">{edu_text}</div></div>'
-
-    # Summary
-    summary_html = ""
-    if "SUMMARY" in sections:
-        summary_html = f'<div class="section"><div class="section-title">Summary</div><div class="summary">{sections["SUMMARY"].strip()}</div></div>'
-
-    # Contact line parsing
-    contact = resume["contact"]
-    contact_parts = [p.strip() for p in contact.split("|")] if contact else []
-    contact_html = " &nbsp;|&nbsp; ".join(contact_parts)
-
-    # Location line (may be empty)
-    location_html = f'<div class="location">{resume["location"]}</div>' if resume["location"] else ""
-
+    contact = " &nbsp;|&nbsp; ".join(
+        inline_text(part.strip()) for part in resume["contact"].split("|") if part.strip()
+    )
+    location = f'<div class="location">{inline_text(resume["location"])}</div>' if resume["location"] else ""
     return f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-@page {{
-    size: letter;
-    margin: 0.28in 0.4in;
-}}
-* {{
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}}
-body {{
-    font-family: 'Calibri', 'Segoe UI', Arial, sans-serif;
-    font-size: 9pt;
-    line-height: 1.2;
-    color: #1a1a1a;
-}}
-.header {{
-    text-align: center;
-    margin-bottom: 3px;
-    padding-bottom: 3px;
-    border-bottom: 1.5px solid #2a7ab5;
-}}
-.name {{
-    font-size: 16pt;
-    font-weight: 700;
-    color: #1a3a5c;
-    letter-spacing: 0.5px;
-}}
-.title {{
-    font-size: 9.5pt;
-    color: #3a6b8c;
-    margin: 1px 0;
-}}
-.location {{
-    font-size: 9pt;
-    color: #555;
-}}
-.contact {{
-    font-size: 9pt;
-    color: #444;
-    margin-top: 1px;
-}}
-.contact a {{
-    color: #2c3e50;
-    text-decoration: none;
-}}
-.section {{
-    margin-top: 3px;
-}}
-.section-title {{
-    font-size: 9pt;
-    font-weight: 700;
-    color: #1a3a5c;
-    text-transform: uppercase;
-    letter-spacing: 0.8px;
-    border-bottom: 1.5px solid #2a7ab5;
-    padding-bottom: 1px;
-    margin-bottom: 2px;
-    break-after: avoid;
-    page-break-after: avoid;
-}}
-.summary {{
-    font-size: 8.8pt;
-    color: #333;
-    line-height: 1.2;
-}}
-.skill-row {{
-    font-size: 8.8pt;
-    margin: 0;
-    line-height: 1.2;
-}}
-.skill-cat {{
-    font-weight: 600;
-    color: #1a3a5c;
-}}
-.entry {{
-    margin-bottom: 2px;
-    break-inside: auto;
-    page-break-inside: auto;
-}}
-.entry-title {{
-    font-weight: 600;
-    font-size: 9pt;
-    color: #1a3a5c;
-    break-after: avoid;
-    page-break-after: avoid;
-}}
-.entry-subtitle {{
-    font-size: 9pt;
-    color: #4a7a9b;
-    font-style: italic;
-    margin-bottom: 1px;
-}}
-ul {{
-    margin-left: 14px;
-    padding: 0;
-}}
-li {{
-    font-size: 8.8pt;
-    margin-bottom: 0.5px;
-    line-height: 1.2;
-    orphans: 2;
-    widows: 2;
-}}
-.edu {{
-    font-size: 10pt;
-}}
-</style>
-</head>
-<body>
-<div class="header">
-    <div class="name">{resume['name']}</div>
-    <div class="title">{resume['title']}</div>
-    {location_html}
-    <div class="contact">{contact_html}</div>
-</div>
-{summary_html}
-{skills_html}
-{exp_html}
-{proj_html}
-{edu_html}
-</body>
-</html>"""
+<html><head><meta charset="utf-8"><style>
+@page {{ size: letter; margin: 0.28in 0.45in; }}
+* {{ box-sizing: border-box; }}
+body {{ font-family: Calibri, 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; line-height: 1.25; color: #1a1a1a; margin: 0; }}
+.header {{ text-align: center; margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1.5px solid #2a7ab5; }}
+.name {{ font-size: 17pt; font-weight: 700; color: #1a3a5c; }}
+.title {{ font-size: 10.5pt; color: #3a6b8c; margin: 2px 0; }}
+.location, .contact {{ font-size: 9pt; color: #444; }}
+.section {{ margin-top: 7px; break-inside: auto; page-break-inside: auto; }}
+.page-break-before {{ break-before: page; page-break-before: always; }}
+.section-title {{ font-size: 10pt; font-weight: 700; color: #1a3a5c; text-transform: uppercase; letter-spacing: .5px; border-bottom: 1px solid #2a7ab5; padding-bottom: 2px; margin-bottom: 4px; break-after: avoid; page-break-after: avoid; }}
+.summary, .plain {{ font-size: 10.3pt; line-height: 1.25; white-space: normal; }}
+.skill-row {{ font-size: 10pt; line-height: 1.23; }}
+.skill-cat {{ font-weight: 600; color: #1a3a5c; }}
+.entry {{ margin-bottom: 6px; break-inside: avoid-page; page-break-inside: avoid; }}
+.entry-title {{ font-weight: 600; color: #1a3a5c; break-after: avoid; page-break-after: avoid; }}
+.entry-subtitle {{ font-size: 9.5pt; color: #4a7a9b; font-style: italic; }}
+ul {{ margin: 2px 0 2px 16px; padding: 0; }}
+li {{ font-size: 10.2pt; margin: 0 0 2px; line-height: 1.24; orphans: 2; widows: 2; }}
+.plain {{ white-space: normal; }}
+</style></head><body>
+<header class="header"><div class="name">{inline_text(resume['name'])}</div>
+<div class="title">{inline_text(resume['title'])}</div>{location}<div class="contact">{contact}</div></header>
+{''.join(rendered_sections)}
+</body></html>"""
 
 
 # ── PDF Renderer ─────────────────────────────────────────────────────────
@@ -358,9 +266,9 @@ def render_pdf(html: str, output_path: str) -> None:
             format="Letter",
             margin={
                 "top": "0.28in",
-                "right": "0.4in",
+                "right": "0.45in",
                 "bottom": "0.28in",
-                "left": "0.4in",
+                "left": "0.45in",
             },
             print_background=True,
         )

@@ -55,7 +55,7 @@ Enter salary values as digits (for example, `80000`). Use semicolons between lis
 
 The saved annual salary expectation is also a hard application floor: postings whose known maximum is below it are excluded from the apply queue. Hourly rates are annualized at 2,080 hours. Listings with missing or unclear pay remain visible for review, and salary answers must never fall below the saved floor. Fit scores measure role match and do not include salary eligibility; check the salary label in the dashboard.
 
-By default, JobHop preserves the resume text without AI rewriting and copies the source PDF unchanged when one is available. This keeps job titles, section placement, education, certifications, and pagination intact. AI resume rewriting is opt-in with `allow_resume_rewriting: true` in the local profile; review any rewritten document before using it.
+By default, Codex tailors each resume by rewriting the summary and existing bullets for that job and reordering existing skill rows and projects. It preserves your headline, role titles, employers, dates, every section, education, certifications, and all source facts; numbers in the summary and bullets must remain unchanged. The PDF keeps all sections and can span multiple pages. Set `allow_resume_rewriting: false` in your local profile to keep using the source resume unchanged. Review each generated resume before using it.
 
 Codex is the default provider for scoring, tailoring, cover letters, and the browser stage. The local Codex CLI login is used; no model API key is needed. API providers are available only when explicitly selected with `JOBHOP_AI_PROVIDER=api` in the local `.env` file.
 
