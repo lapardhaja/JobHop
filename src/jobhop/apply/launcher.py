@@ -136,6 +136,13 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        excluded_patterns = config.load_excluded_job_urls()
+        exclusion_clause = ""
+        exclusion_params: list[str] = []
+        for pattern in excluded_patterns:
+            exclusion_clause += " AND instr(lower(COALESCE(url, '')), ?) = 0"
+            exclusion_clause += " AND instr(lower(COALESCE(application_url, '')), ?) = 0"
+            exclusion_params.extend((pattern, pattern))
 
         if target_url:
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
@@ -147,8 +154,9 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status != 'in_progress')
+                  {exclusion_clause}
                 LIMIT 1
-            """, (target_url, target_url, like, like)).fetchone()
+            """, (target_url, target_url, like, like, *exclusion_params)).fetchone()
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
@@ -162,6 +170,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             if blocked_patterns:
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
+            params.extend(exclusion_params)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
                        fit_score, location, full_description, cover_letter_path,
@@ -173,6 +182,7 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
+                  {exclusion_clause}
                 ORDER BY fit_score DESC, url
                 LIMIT 1
             """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()

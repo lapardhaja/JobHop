@@ -66,8 +66,13 @@ def _redact_sensitive(text: str) -> str:
 
 
 def find_codex_cli() -> str | None:
-    """Return the Codex executable available on PATH, if any."""
-    return shutil.which("codex") or shutil.which("codex.exe")
+    """Return the Codex executable available on PATH, preferring the native binary.
+
+    On Windows, ``codex`` may resolve to an npm ``.cmd`` shim, which cannot be
+    launched directly by ``subprocess``. Prefer the native ``codex.exe`` when
+    both are installed.
+    """
+    return shutil.which("codex.exe") or shutil.which("codex")
 
 
 def codex_login_status(executable: str | None = None) -> tuple[bool, str]:

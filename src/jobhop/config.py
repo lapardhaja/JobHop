@@ -15,6 +15,7 @@ RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
 SEARCH_CONFIG_PATH = APP_DIR / "searches.yaml"
 ENV_PATH = APP_DIR / ".env"
+EXCLUDED_URLS_PATH = APP_DIR / "excluded_urls.txt"
 
 # Generated output
 TAILORED_DIR = APP_DIR / "tailored_resumes"
@@ -143,6 +144,33 @@ def load_blocked_sites() -> tuple[set[str], list[str]]:
     sites = set(blocked.get("sites", []))
     patterns = blocked.get("url_patterns", [])
     return sites, patterns
+
+
+def load_excluded_job_urls() -> list[str]:
+    """Load private job URLs that must never enter the application queue.
+
+    Store one listing URL per line in ``~/.jobhop/excluded_urls.txt``. Query
+    strings and fragments are ignored so tracking parameters do not bypass an
+    exclusion. Returned values are lowercase host-and-path substrings for use
+    with parameterized SQL ``instr`` checks.
+    """
+    from urllib.parse import urlsplit
+
+    if not EXCLUDED_URLS_PATH.exists():
+        return []
+
+    patterns: list[str] = []
+    for line in EXCLUDED_URLS_PATH.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if not value or value.startswith("#"):
+            continue
+        parsed = urlsplit(value)
+        if not parsed.netloc or not parsed.path:
+            continue
+        pattern = f"{parsed.netloc}{parsed.path}".lower().rstrip("/")
+        if pattern and pattern not in patterns:
+            patterns.append(pattern)
+    return patterns
 
 
 def load_blocked_sso() -> list[str]:

@@ -98,6 +98,8 @@ Replace the sample city and district names with the places you want. The wizard'
 
 The configuration also controls role queries, boards, age of postings, and excluded job titles. `src/jobhop/config/searches.example.yaml` has a fuller example.
 
+To keep a particular listing out of every application run, add its URL on a separate line in `%USERPROFILE%\.jobhop\excluded_urls.txt` (Windows) or `~/.jobhop/excluded_urls.txt` (macOS/Linux). JobHop ignores the URL's query string and checks both the listing and application URLs, including when a listing is selected directly.
+
 ## First run
 
 Run the stages that prepare materials, then inspect what JobHop found:
