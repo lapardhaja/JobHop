@@ -213,7 +213,7 @@ def build_html(resume: dict) -> str:
     for heading, content in resume["sections"].items():
         normalized = heading.upper()
         safe_heading = inline_text(heading)
-        section_class = "section page-break-before" if normalized == "RESEARCH EXPERIENCE" else "section"
+        section_class = "section page-break-before" if normalized == "ADDITIONAL EXPERIENCE" else "section"
         if "SKILL" in normalized:
             rows = parse_skills(content)
             body = "".join(
