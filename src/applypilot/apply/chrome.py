@@ -9,9 +9,11 @@ import logging
 import platform
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from applypilot import config
 
@@ -22,6 +24,7 @@ BASE_CDP_PORT = 9222
 
 # Track Chrome processes per worker for cleanup
 _chrome_procs: dict[int, subprocess.Popen] = {}
+_temporary_profiles: dict[int, Path] = {}
 _chrome_lock = threading.Lock()
 
 
@@ -187,13 +190,17 @@ def _suppress_restore_nag(profile_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def launch_chrome(worker_id: int, port: int | None = None,
-                  headless: bool = False) -> subprocess.Popen:
+                  headless: bool = False,
+                  initial_url: str | None = None,
+                  fresh_profile: bool = False) -> subprocess.Popen:
     """Launch a Chrome instance with remote debugging for a worker.
 
     Args:
         worker_id: Numeric worker identifier.
         port: CDP port. Defaults to BASE_CDP_PORT + worker_id.
         headless: Run Chrome in headless mode (no visible window).
+        initial_url: Optional HTTP(S) page to open before connecting an agent.
+        fresh_profile: Use a clean temporary profile without copied user cookies.
 
     Returns:
         subprocess.Popen handle for the Chrome process.
@@ -201,15 +208,28 @@ def launch_chrome(worker_id: int, port: int | None = None,
     if port is None:
         port = BASE_CDP_PORT + worker_id
 
-    profile_dir = setup_worker_profile(worker_id)
+    if initial_url:
+        parsed_url = urlsplit(initial_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.hostname
+            or parsed_url.username is not None
+            or parsed_url.password is not None
+        ):
+            raise ValueError("Preview URL must use HTTP or HTTPS.")
+
+    chrome_exe = config.get_chrome_path()
+
+    profile_dir = (
+        Path(tempfile.mkdtemp(prefix=f"jobhop-preview-{worker_id}-"))
+        if fresh_profile else setup_worker_profile(worker_id)
+    )
 
     # Kill any zombie Chrome from a previous run on this port
     _kill_on_port(port)
 
     # Patch preferences to suppress restore nag
     _suppress_restore_nag(profile_dir)
-
-    chrome_exe = config.get_chrome_path()
 
     cmd = [
         chrome_exe,
@@ -234,6 +254,8 @@ def launch_chrome(worker_id: int, port: int | None = None,
     ]
     if headless:
         cmd.append("--headless=new")
+    if initial_url:
+        cmd.append(initial_url)
 
     # On Unix, start in a new process group so we can kill the whole tree
     kwargs: dict = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -241,9 +263,16 @@ def launch_chrome(worker_id: int, port: int | None = None,
         import os
         kwargs["preexec_fn"] = os.setsid
 
-    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        proc = subprocess.Popen(cmd, **kwargs)
+    except Exception:
+        if fresh_profile:
+            shutil.rmtree(profile_dir, ignore_errors=True)
+        raise
     with _chrome_lock:
         _chrome_procs[worker_id] = proc
+        if fresh_profile:
+            _temporary_profiles[worker_id] = profile_dir
 
     # Give Chrome time to start and open the debug port
     time.sleep(3)
@@ -261,8 +290,15 @@ def cleanup_worker(worker_id: int, process: subprocess.Popen | None) -> None:
     """
     if process and process.poll() is None:
         _kill_process_tree(process.pid)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
     with _chrome_lock:
         _chrome_procs.pop(worker_id, None)
+        temporary_profile = _temporary_profiles.pop(worker_id, None)
+    if temporary_profile:
+        shutil.rmtree(temporary_profile, ignore_errors=True)
     logger.info("[worker-%d] Chrome cleaned up", worker_id)
 
 
@@ -274,11 +310,19 @@ def kill_all_chrome() -> None:
     with _chrome_lock:
         procs = dict(_chrome_procs)
         _chrome_procs.clear()
+        temporary_profiles = dict(_temporary_profiles)
+        _temporary_profiles.clear()
 
     for wid, proc in procs.items():
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         _kill_on_port(BASE_CDP_PORT + wid)
+    for profile_dir in temporary_profiles.values():
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
     # Sweep base port in case of zombies
     _kill_on_port(BASE_CDP_PORT)
@@ -311,11 +355,19 @@ def cleanup_on_exit() -> None:
     with _chrome_lock:
         procs = dict(_chrome_procs)
         _chrome_procs.clear()
+        temporary_profiles = dict(_temporary_profiles)
+        _temporary_profiles.clear()
 
     for wid, proc in procs.items():
         if proc.poll() is None:
             _kill_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
         _kill_on_port(BASE_CDP_PORT + wid)
+    for profile_dir in temporary_profiles.values():
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
     # Sweep base port for any orphan
     _kill_on_port(BASE_CDP_PORT)

@@ -1,6 +1,6 @@
-# Contributing to ApplyPilot
+# Contributing to JobHop
 
-Thank you for your interest in contributing to ApplyPilot. This guide covers everything you need to get started.
+Thank you for your interest in contributing to JobHop, a local fork of [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot). Keep JobHop changes in this checkout unless you intentionally prepare a separate contribution for upstream.
 
 ## Development Setup
 
@@ -12,18 +12,16 @@ Thank you for your interest in contributing to ApplyPilot. This guide covers eve
 ### Clone and Install
 
 ```bash
-git clone https://github.com/Pickle-Pixel/ApplyPilot.git
-cd ApplyPilot
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 playwright install chromium
 ```
 
-This installs ApplyPilot in editable mode with all development dependencies (pytest, ruff, etc.) and downloads the Chromium browser binary for Playwright.
+This installs JobHop in editable mode with its development dependencies and downloads the Chromium browser binary for Playwright.
 
 ### Verify Installation
 
 ```bash
-applypilot --version
+jobhop --version
 pytest tests/ -v
 ruff check src/
 ```
@@ -45,7 +43,7 @@ Workday employer portals are configured in `config/employers.yaml`. To add a new
   url: "https://company.wd5.myworkdaysite.com/en-US/recruiting"
 ```
 
-4. Test discovery: `applypilot discover --employer "Company Name"`
+4. Test discovery with the relevant JobHop pipeline command.
 5. Submit a PR with the new entry
 
 ### Adding New Career Sites
@@ -66,14 +64,14 @@ Direct career site scrapers are configured in `config/sites.yaml`. To add a new 
     description: ".job-description"
 ```
 
-3. Test: `applypilot discover --site "Company Name"`
+3. Test discovery with the relevant JobHop pipeline command.
 4. Submit a PR
 
 ### Bug Fixes and Features
 
-1. Check existing [issues](https://github.com/Pickle-Pixel/ApplyPilot/issues) to avoid duplicating work
+1. Check the upstream [ApplyPilot issues](https://github.com/Pickle-Pixel/ApplyPilot/issues) only when preparing a contribution for upstream
 2. For new features, open an issue first to discuss the approach
-3. Fork the repo and create a feature branch from `main`
+3. Create a feature branch from the JobHop checkout
 4. Write your code with type hints and docstrings
 5. Add tests for new functionality
 6. Update the CHANGELOG.md under an `[Unreleased]` section
@@ -94,7 +92,7 @@ pytest tests/ --cov=src/applypilot --cov-report=term-missing
 
 ## Linting and Code Style
 
-ApplyPilot uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting.
+JobHop uses [Ruff](https://docs.astral.sh/ruff/) for linting and formatting.
 
 ```bash
 # Check for issues
@@ -127,7 +125,7 @@ ruff format src/
 ## Project Structure
 
 ```
-ApplyPilot/
+JobHop/
 ├── src/applypilot/       # Main package
 │   ├── __init__.py
 │   ├── cli.py            # CLI entry points
@@ -146,4 +144,4 @@ ApplyPilot/
 
 ## License
 
-By contributing to ApplyPilot, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0](LICENSE).
+By contributing to JobHop, you agree that your contributions will be licensed under the [GNU Affero General Public License v3.0](LICENSE).

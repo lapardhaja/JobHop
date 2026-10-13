@@ -1,7 +1,7 @@
-"""Apply orchestration: acquire jobs, spawn Claude Code sessions, track results.
+"""Apply orchestration: acquire jobs, run Codex browser sessions, track results.
 
 This is the main entry point for the apply pipeline. It pulls jobs from
-the database, launches Chrome + Claude Code for each one, parses the
+the database, launches Chrome + Codex for each one, parses the
 result, and updates the database. Supports parallel workers via --workers.
 """
 
@@ -24,6 +24,7 @@ from rich.console import Console
 from rich.live import Live
 
 from applypilot import config
+from applypilot.codex import CodexExecutionError, CodexResult, run_codex_exec
 from applypilot.database import get_connection
 from applypilot.apply import chrome, dashboard, prompt as prompt_mod
 from applypilot.apply.chrome import (
@@ -49,9 +50,10 @@ POLL_INTERVAL = config.DEFAULTS["poll_interval"]
 # Thread-safe shutdown coordination
 _stop_event = threading.Event()
 
-# Track active Claude Code processes for skip (Ctrl+C) handling
-_claude_procs: dict[int, subprocess.Popen] = {}
-_claude_lock = threading.Lock()
+# Track active Codex processes for skip (Ctrl+C) handling.
+_codex_procs: dict[int, subprocess.Popen] = {}
+_codex_lock = threading.Lock()
+_skip_workers: set[int] = set()
 
 # Register cleanup on exit
 atexit.register(cleanup_on_exit)
@@ -63,24 +65,56 @@ if platform.system() != "Windows":
 # MCP config
 # ---------------------------------------------------------------------------
 
-def _make_mcp_config(cdp_port: int) -> dict:
-    """Build MCP config dict for a specific CDP port."""
-    return {
-        "mcpServers": {
-            "playwright": {
-                "command": "npx",
-                "args": [
-                    "@playwright/mcp@latest",
-                    f"--cdp-endpoint=http://localhost:{cdp_port}",
-                    f"--viewport-size={config.DEFAULTS['viewport']}",
-                ],
-            },
-            "gmail": {
-                "command": "npx",
-                "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
-            },
-        }
-    }
+def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
+    """Build invocation-local MCP settings; never write the user's Codex config."""
+    playwright_args = [
+        "-y",
+        "@playwright/mcp@latest",
+        f"--cdp-endpoint=http://localhost:{cdp_port}",
+        f"--viewport-size={config.DEFAULTS['viewport']}",
+    ]
+    gmail_args = ["-y", "@gongrzhe/server-gmail-autoauth-mcp"]
+    # Retain the upstream Gmail MCP's mail-mutation restrictions. Read/search
+    # tools remain available for verification flows; dry-run prompts forbid sends.
+    gmail_tools = [
+        "draft_email", "modify_email", "delete_email", "download_attachment",
+        "batch_modify_emails", "batch_delete_emails", "create_label",
+        "update_label", "delete_label", "get_or_create_label",
+        "list_email_labels", "create_filter", "list_filters", "get_filter",
+        "delete_filter",
+    ]
+    preview_tools = [
+        "browser_snapshot", "browser_find",
+        "browser_take_screenshot", "browser_console_messages",
+        "browser_network_requests", "browser_wait_for",
+    ]
+    overrides = [
+        'mcp_servers.playwright.command="npx"',
+        f"mcp_servers.playwright.args={json.dumps(playwright_args)}",
+        'mcp_servers.playwright.default_tools_approval_mode="auto"',
+        'mcp_servers.gmail.command="npx"',
+        f"mcp_servers.gmail.args={json.dumps(gmail_args)}",
+        f"mcp_servers.gmail.disabled_tools={json.dumps(gmail_tools)}",
+        'mcp_servers.gmail.default_tools_approval_mode="auto"',
+    ]
+    if dry_run:
+        overrides.extend([
+            f"mcp_servers.playwright.enabled_tools={json.dumps(preview_tools)}",
+            "mcp_servers.gmail.enabled=false",
+            # A hostile page must not be able to ask Codex to inspect local
+            # applicant files or open another browser. The preview only needs
+            # the explicitly allowlisted Playwright inspection tools.
+            "features.shell_tool=false",
+            "features.multi_agent=false",
+            "features.browser_use=false",
+            "features.browser_use_external=false",
+            "features.computer_use=false",
+            "features.apps=false",
+            "features.plugins=false",
+            "features.remote_plugin=false",
+            "features.code_mode_host=false",
+        ])
+    return overrides
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +122,7 @@ def _make_mcp_config(cdp_port: int) -> dict:
 # ---------------------------------------------------------------------------
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
-                worker_id: int = 0) -> dict | None:
+                worker_id: int = 0, dry_run: bool = False) -> dict | None:
     """Atomically acquire the next job to apply to.
 
     Args:
@@ -107,11 +141,12 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
             row = conn.execute("""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path,
+                       apply_status, agent_id, last_attempted_at
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND apply_status != 'in_progress'
+                  AND (apply_status IS NULL OR apply_status != 'in_progress')
                 LIMIT 1
             """, (target_url, target_url, like, like)).fetchone()
         else:
@@ -129,7 +164,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 params.extend(blocked_patterns)
             row = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
-                       fit_score, location, full_description, cover_letter_path
+                       fit_score, location, full_description, cover_letter_path,
+                       apply_status, agent_id, last_attempted_at
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
                   AND (apply_status IS NULL OR apply_status = 'failed')
@@ -145,10 +181,21 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
             conn.rollback()
             return None
 
-        # Skip manual ATS sites (unsolvable CAPTCHAs)
+        job = dict(row)
+        previous_status = row["apply_status"]
+        job["_previous_agent_id"] = row["agent_id"]
+        job["_previous_last_attempted_at"] = row["last_attempted_at"]
+
+        # Skip manual ATS sites (unsolvable CAPTCHAs). Preview mode must not
+        # write even this queue annotation.
         from applypilot.config import is_manual_ats
         apply_url = row["application_url"] or row["url"]
         if is_manual_ats(apply_url):
+            if dry_run:
+                job["_manual_ats"] = True
+                job["_previous_apply_status"] = previous_status
+                conn.rollback()
+                return job
             conn.execute(
                 "UPDATE jobs SET apply_status = 'manual', apply_error = 'manual ATS' WHERE url = ?",
                 (row["url"],),
@@ -166,7 +213,8 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
         """, (f"worker-{worker_id}", now, row["url"]))
         conn.commit()
 
-        return dict(row)
+        job["_previous_apply_status"] = previous_status
+        return job
     except Exception:
         conn.rollback()
         raise
@@ -196,13 +244,23 @@ def mark_result(url: str, status: str, error: str | None = None,
     conn.commit()
 
 
-def release_lock(url: str) -> None:
-    """Release the in_progress lock without changing status."""
+def release_lock(url: str, *, restore_previous: bool = False,
+                 restore_status: str | None = None,
+                 restore_agent_id: str | None = None,
+                 restore_last_attempted_at: str | None = None) -> None:
+    """Release a job lock, optionally restoring its exact prior state."""
     conn = get_connection()
-    conn.execute(
-        "UPDATE jobs SET apply_status = NULL, agent_id = NULL WHERE url = ? AND apply_status = 'in_progress'",
-        (url,),
-    )
+    if restore_previous:
+        conn.execute(
+            "UPDATE jobs SET apply_status = ?, agent_id = ?, last_attempted_at = ? "
+            "WHERE url = ? AND apply_status = 'in_progress'",
+            (restore_status, restore_agent_id, restore_last_attempted_at, url),
+        )
+    else:
+        conn.execute(
+            "UPDATE jobs SET apply_status = NULL, agent_id = NULL WHERE url = ? AND apply_status = 'in_progress'",
+            (url,),
+        )
     conn.commit()
 
 
@@ -211,8 +269,8 @@ def release_lock(url: str) -> None:
 # ---------------------------------------------------------------------------
 
 def gen_prompt(target_url: str, min_score: int = 7,
-               model: str = "sonnet", worker_id: int = 0) -> Path | None:
-    """Generate a prompt file and print the Claude CLI command for manual debugging.
+               model: str | None = None, worker_id: int = 0) -> Path | None:
+    """Generate a prompt file for manual Codex CLI debugging.
 
     Returns:
         Path to the generated prompt file, or None if no job found.
@@ -221,28 +279,30 @@ def gen_prompt(target_url: str, min_score: int = 7,
     if not job:
         return None
 
-    # Read resume text
-    resume_path = job.get("tailored_resume_path")
-    txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
-    resume_text = ""
-    if txt_path and txt_path.exists():
-        resume_text = txt_path.read_text(encoding="utf-8")
+    try:
+        # Read resume text
+        resume_path = job.get("tailored_resume_path")
+        txt_path = Path(resume_path).with_suffix(".txt") if resume_path else None
+        resume_text = ""
+        if txt_path and txt_path.exists():
+            resume_text = txt_path.read_text(encoding="utf-8")
 
-    prompt = prompt_mod.build_prompt(job=job, tailored_resume=resume_text)
-
-    # Release the lock so the job stays available
-    release_lock(job["url"])
+        prompt = prompt_mod.build_prompt(job=job, tailored_resume=resume_text)
+    finally:
+        # Release the lock even when a resume or profile is malformed.
+        release_lock(
+            job["url"],
+            restore_previous=True,
+            restore_status=job.get("_previous_apply_status"),
+            restore_agent_id=job.get("_previous_agent_id"),
+            restore_last_attempted_at=job.get("_previous_last_attempted_at"),
+        )
 
     # Write prompt file
     config.ensure_dirs()
     site_slug = (job.get("site") or "unknown")[:20].replace(" ", "_")
     prompt_file = config.LOG_DIR / f"prompt_{site_slug}_{job['title'][:30].replace(' ', '_')}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
-
-    # Write MCP config for reference
-    port = BASE_CDP_PORT + worker_id
-    mcp_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
 
     return prompt_file
 
@@ -295,12 +355,12 @@ def reset_failed() -> int:
 # ---------------------------------------------------------------------------
 
 def run_job(job: dict, port: int, worker_id: int = 0,
-            model: str = "sonnet", dry_run: bool = False) -> tuple[str, int]:
-    """Spawn a Claude Code session for one job application.
+            model: str | None = None, dry_run: bool = False) -> tuple[str, int]:
+    """Spawn one Codex CLI session for a job application.
 
     Returns:
         Tuple of (status_string, duration_ms). Status is one of:
-        'applied', 'expired', 'captcha', 'login_issue',
+        'applied', 'dry_run', 'expired', 'captcha', 'login_issue',
         'failed:reason', or 'skipped'.
     """
     # Read tailored resume text
@@ -316,36 +376,6 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         tailored_resume=resume_text,
         dry_run=dry_run,
     )
-
-    # Write per-worker MCP config
-    mcp_config_path = config.APP_DIR / f".mcp-apply-{worker_id}.json"
-    mcp_config_path.write_text(json.dumps(_make_mcp_config(port)), encoding="utf-8")
-
-    # Build claude command
-    cmd = [
-        "claude",
-        "--model", model,
-        "-p",
-        "--mcp-config", str(mcp_config_path),
-        "--permission-mode", "bypassPermissions",
-        "--no-session-persistence",
-        "--disallowedTools", (
-            "mcp__gmail__draft_email,mcp__gmail__modify_email,"
-            "mcp__gmail__delete_email,mcp__gmail__download_attachment,"
-            "mcp__gmail__batch_modify_emails,mcp__gmail__batch_delete_emails,"
-            "mcp__gmail__create_label,mcp__gmail__update_label,"
-            "mcp__gmail__delete_label,mcp__gmail__get_or_create_label,"
-            "mcp__gmail__list_email_labels,mcp__gmail__create_filter,"
-            "mcp__gmail__list_filters,mcp__gmail__get_filter,"
-            "mcp__gmail__delete_filter"
-        ),
-        "--output-format", "stream-json",
-        "--verbose", "-",
-    ]
-
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-    env.pop("CLAUDE_CODE_ENTRYPOINT", None)
 
     worker_dir = reset_worker_dir(worker_id)
 
@@ -365,106 +395,102 @@ def run_job(job: dict, port: int, worker_id: int = 0,
     )
 
     start = time.time()
-    stats: dict = {}
-    proc = None
+    result_data: CodexResult | None = None
+
+    def _track_process(proc: subprocess.Popen | None) -> None:
+        with _codex_lock:
+            if proc is None:
+                _codex_procs.pop(worker_id, None)
+            else:
+                _codex_procs[worker_id] = proc
+
+    def _handle_event(event: dict) -> None:
+        if event.get("type") != "item.completed":
+            return
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
+            return
+        name = item.get("name") or item.get("tool") or "MCP tool"
+        server = item.get("server")
+        if server:
+            name = f"{server}:{name}"
+        arguments = item.get("arguments") or item.get("input") or {}
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+        if isinstance(arguments, dict):
+            if arguments.get("url"):
+                detail = str(arguments["url"])[:60]
+            elif arguments.get("ref"):
+                detail = str(arguments.get("element") or arguments.get("text") or arguments["ref"])[:45]
+            elif arguments.get("fields"):
+                detail = f"({len(arguments['fields'])} fields)"
+            elif arguments.get("paths"):
+                detail = "upload"
+            else:
+                detail = ""
+        else:
+            detail = ""
+        action = f"{name} {detail}".strip()[:70]
+        add_event(f"[W{worker_id}] {action}")
+        ws = get_state(worker_id)
+        update_state(worker_id, actions=(ws.actions if ws else 0) + 1,
+                     last_action=action[:35])
+
+    with _codex_lock:
+        _skip_workers.discard(worker_id)
 
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            cwd=str(worker_dir),
-        )
-        with _claude_lock:
-            _claude_procs[worker_id] = proc
-
-        proc.stdin.write(agent_prompt)
-        proc.stdin.close()
-
-        text_parts: list[str] = []
         with open(worker_log, "a", encoding="utf-8") as lf:
             lf.write(log_header)
-
-            for line in proc.stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    msg = json.loads(line)
-                    msg_type = msg.get("type")
-                    if msg_type == "assistant":
-                        for block in msg.get("message", {}).get("content", []):
-                            bt = block.get("type")
-                            if bt == "text":
-                                text_parts.append(block["text"])
-                                lf.write(block["text"] + "\n")
-                            elif bt == "tool_use":
-                                name = (
-                                    block.get("name", "")
-                                    .replace("mcp__playwright__", "")
-                                    .replace("mcp__gmail__", "gmail:")
-                                )
-                                inp = block.get("input", {})
-                                if "url" in inp:
-                                    desc = f"{name} {inp['url'][:60]}"
-                                elif "ref" in inp:
-                                    desc = f"{name} {inp.get('element', inp.get('text', ''))}"[:50]
-                                elif "fields" in inp:
-                                    desc = f"{name} ({len(inp['fields'])} fields)"
-                                elif "paths" in inp:
-                                    desc = f"{name} upload"
-                                else:
-                                    desc = name
-
-                                lf.write(f"  >> {desc}\n")
-                                ws = get_state(worker_id)
-                                cur_actions = ws.actions if ws else 0
-                                update_state(worker_id,
-                                             actions=cur_actions + 1,
-                                             last_action=desc[:35])
-                    elif msg_type == "result":
-                        stats = {
-                            "input_tokens": msg.get("usage", {}).get("input_tokens", 0),
-                            "output_tokens": msg.get("usage", {}).get("output_tokens", 0),
-                            "cache_read": msg.get("usage", {}).get("cache_read_input_tokens", 0),
-                            "cache_create": msg.get("usage", {}).get("cache_creation_input_tokens", 0),
-                            "cost_usd": msg.get("total_cost_usd", 0),
-                            "turns": msg.get("num_turns", 0),
-                        }
-                        text_parts.append(msg.get("result", ""))
-                except json.JSONDecodeError:
-                    text_parts.append(line)
-                    lf.write(line + "\n")
-
-        proc.wait(timeout=300)
-        returncode = proc.returncode
-        proc = None
-
-        if returncode and returncode < 0:
-            return "skipped", int((time.time() - start) * 1000)
-
-        output = "\n".join(text_parts)
-        elapsed = int(time.time() - start)
+        result_data = run_codex_exec(
+            agent_prompt,
+            model=model or os.environ.get("CODEX_MODEL") or None,
+            config_overrides=_codex_mcp_overrides(port, dry_run=dry_run),
+            timeout_s=300,
+            cwd=str(worker_dir),
+            on_event=_handle_event,
+            on_process=_track_process,
+        )
         duration_ms = int((time.time() - start) * 1000)
+        output = result_data.final_text
 
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        job_log = config.LOG_DIR / f"claude_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
+        job_log = config.LOG_DIR / f"codex_{ts}_w{worker_id}_{job.get('site', 'unknown')[:20]}.txt"
         job_log.write_text(output, encoding="utf-8")
 
-        if stats:
-            cost = stats.get("cost_usd", 0)
+        if result_data.usage is not None or result_data.turns:
             ws = get_state(worker_id)
-            prev_cost = ws.total_cost if ws else 0.0
-            update_state(worker_id, total_cost=prev_cost + cost)
+            previous_turns = ws.total_turns if ws else 0
+            previous_input = ws.total_input_tokens if ws else 0
+            previous_output = ws.total_output_tokens if ws else 0
+            usage = result_data.usage or {}
+            update_state(
+                worker_id,
+                total_turns=previous_turns + result_data.turns,
+                total_input_tokens=previous_input + usage.get("input_tokens", 0),
+                total_output_tokens=previous_output + usage.get("output_tokens", 0),
+            )
+
+        with open(worker_log, "a", encoding="utf-8") as lf:
+            lf.write(output + "\n")
 
         def _clean_reason(s: str) -> str:
             return re.sub(r'[*`"]+$', '', s).strip()
 
+        if "RESULT:DRY_RUN" in output:
+            add_event(f"[W{worker_id}] PREVIEW COMPLETE: {job['title'][:34]}")
+            update_state(worker_id, status="dry_run", last_action="preview complete")
+            return "dry_run", duration_ms
+
+        if dry_run and "RESULT:APPLIED" in output:
+            add_event(f"[W{worker_id}] Unexpected submission result in preview")
+            update_state(worker_id, status="failed", last_action="unexpected result in preview")
+            return "failed:dry_run_unexpected_result", duration_ms
+
+        elapsed = int((time.time() - start))
         for result_status in ["APPLIED", "EXPIRED", "CAPTCHA", "LOGIN_ISSUE"]:
             if f"RESULT:{result_status}" in output:
                 add_event(f"[W{worker_id}] {result_status} ({elapsed}s): {job['title'][:30]}")
@@ -475,11 +501,9 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         if "RESULT:FAILED" in output:
             for out_line in output.split("\n"):
                 if "RESULT:FAILED" in out_line:
-                    reason = (
-                        out_line.split("RESULT:FAILED:")[-1].strip()
-                        if ":" in out_line[out_line.index("FAILED") + 6:]
-                        else "unknown"
-                    )
+                    reason = out_line.split("RESULT:FAILED:", 1)[-1].strip()
+                    if reason == out_line.strip() or not reason:
+                        reason = "unknown"
                     reason = _clean_reason(reason)
                     PROMOTE_TO_STATUS = {"captcha", "expired", "login_issue"}
                     if reason in PROMOTE_TO_STATUS:
@@ -497,6 +521,17 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         update_state(worker_id, status="failed", last_action=f"no result ({elapsed}s)")
         return "failed:no_result_line", duration_ms
 
+    except CodexExecutionError as e:
+        with _codex_lock:
+            skipped = worker_id in _skip_workers
+        duration_ms = int((time.time() - start) * 1000)
+        if skipped:
+            add_event(f"[W{worker_id}] Job skipped")
+            update_state(worker_id, status="idle", last_action="skipped")
+            return "skipped", duration_ms
+        add_event(f"[W{worker_id}] CODEX ERROR: {str(e)[:45]}")
+        update_state(worker_id, status="failed", last_action=f"CODEX: {str(e)[:22]}")
+        return f"failed:codex:{str(e)[:80]}", duration_ms
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start) * 1000)
         elapsed = int(time.time() - start)
@@ -509,10 +544,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
         update_state(worker_id, status="failed", last_action=f"ERROR: {str(e)[:25]}")
         return f"failed:{str(e)[:100]}", duration_ms
     finally:
-        with _claude_lock:
-            _claude_procs.pop(worker_id, None)
-        if proc is not None and proc.poll() is None:
-            _kill_process_tree(proc.pid)
+        _track_process(None)
 
 
 # ---------------------------------------------------------------------------
@@ -526,6 +558,7 @@ PERMANENT_FAILURES: set[str] = {
     "not_a_job_application", "unsafe_permissions",
     "unsafe_verification", "sso_required",
     "site_blocked", "cloudflare_blocked", "blocked_by_cloudflare",
+    "manual_review_required",
 }
 
 PERMANENT_PREFIXES: tuple[str, ...] = ("site_blocked", "cloudflare", "blocked_by")
@@ -548,7 +581,7 @@ def _is_permanent_failure(result: str) -> bool:
 def worker_loop(worker_id: int = 0, limit: int = 1,
                 target_url: str | None = None,
                 min_score: int = 7, headless: bool = False,
-                model: str = "sonnet", dry_run: bool = False) -> tuple[int, int]:
+                model: str | None = None, dry_run: bool = False) -> tuple[int, int]:
     """Run jobs sequentially until limit is reached or queue is empty.
 
     Args:
@@ -557,8 +590,8 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome headless.
-        model: Claude model name.
-        dry_run: Don't click Submit.
+        model: Optional Codex model override.
+        dry_run: Preview the application without submitting or changing saved status.
 
     Returns:
         Tuple of (applied_count, failed_count).
@@ -578,7 +611,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                      last_action="waiting for job", actions=0)
 
         job = acquire_job(target_url=target_url, min_score=min_score,
-                          worker_id=worker_id)
+                          worker_id=worker_id, dry_run=dry_run)
         if not job:
             if not continuous:
                 add_event(f"[W{worker_id}] Queue empty")
@@ -596,18 +629,44 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 
         empty_polls = 0
 
+        if job.get("_manual_ats"):
+            add_event(f"[W{worker_id}] Preview skipped: manual ATS requires manual review")
+            update_state(worker_id, status="manual_review",
+                         job_title=job["title"], company=job.get("site", ""),
+                         last_action="manual ATS requires review")
+            jobs_done += 1
+            update_state(worker_id, jobs_done=jobs_done)
+            if target_url:
+                break
+            continue
+
         chrome_proc = None
         try:
             add_event(f"[W{worker_id}] Launching Chrome...")
-            chrome_proc = launch_chrome(worker_id, port=port, headless=headless)
+            chrome_proc = launch_chrome(
+                worker_id,
+                port=port,
+                headless=headless,
+                initial_url=(job.get("application_url") or job["url"]) if dry_run else None,
+                fresh_profile=dry_run,
+            )
 
             result, duration_ms = run_job(job, port=port, worker_id=worker_id,
                                             model=model, dry_run=dry_run)
 
-            if result == "skipped":
+            if dry_run:
+                if result == "skipped":
+                    add_event(f"[W{worker_id}] Preview skipped: {job['title'][:30]}")
+                    update_state(worker_id, status="idle", last_action="preview skipped")
+                elif result == "dry_run":
+                    update_state(worker_id, jobs_done=jobs_done + 1)
+                else:
+                    failed += 1
+                    update_state(worker_id, jobs_failed=failed,
+                                 jobs_done=jobs_done + 1)
+            elif result == "skipped":
                 release_lock(job["url"])
                 add_event(f"[W{worker_id}] Skipped: {job['title'][:30]}")
-                continue
             elif result == "applied":
                 mark_result(job["url"], "applied", duration_ms=duration_ms)
                 applied += 1
@@ -623,22 +682,37 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
                              jobs_done=applied + failed)
 
         except KeyboardInterrupt:
-            release_lock(job["url"])
+            if not dry_run:
+                release_lock(job["url"])
             if _stop_event.is_set():
-                break
-            add_event(f"[W{worker_id}] Job skipped (Ctrl+C)")
-            continue
+                pass
+            else:
+                add_event(f"[W{worker_id}] Job skipped (Ctrl+C)")
+                update_state(worker_id, status="idle", last_action="skipped")
         except Exception as e:
             logger.exception("Worker %d launcher error", worker_id)
             add_event(f"[W{worker_id}] Launcher error: {str(e)[:40]}")
-            release_lock(job["url"])
+            if not dry_run:
+                release_lock(job["url"])
             failed += 1
-            update_state(worker_id, jobs_failed=failed)
+            update_state(worker_id, jobs_failed=failed,
+                         jobs_done=jobs_done + 1)
         finally:
-            if chrome_proc:
-                cleanup_worker(worker_id, chrome_proc)
+            try:
+                if chrome_proc:
+                    cleanup_worker(worker_id, chrome_proc)
+            finally:
+                if dry_run:
+                    release_lock(
+                        job["url"],
+                        restore_previous=True,
+                        restore_status=job.get("_previous_apply_status"),
+                        restore_agent_id=job.get("_previous_agent_id"),
+                        restore_last_attempted_at=job.get("_previous_last_attempted_at"),
+                    )
 
         jobs_done += 1
+        update_state(worker_id, jobs_done=jobs_done)
         if target_url:
             break
 
@@ -651,7 +725,7 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
 # ---------------------------------------------------------------------------
 
 def main(limit: int = 1, target_url: str | None = None,
-         min_score: int = 7, headless: bool = False, model: str = "sonnet",
+         min_score: int = 7, headless: bool = False, model: str | None = None,
          dry_run: bool = False, continuous: bool = False,
          poll_interval: int = 60, workers: int = 1) -> None:
     """Launch the apply pipeline.
@@ -661,8 +735,8 @@ def main(limit: int = 1, target_url: str | None = None,
         target_url: Apply to a specific URL.
         min_score: Minimum fit_score threshold.
         headless: Run Chrome in headless mode.
-        model: Claude model name.
-        dry_run: Don't click Submit.
+        model: Optional Codex model override.
+        dry_run: Preview without submitting or changing saved status.
         continuous: Run forever, polling for new jobs.
         poll_interval: Seconds between DB polls when queue is empty.
         workers: Number of parallel workers (default 1).
@@ -697,17 +771,19 @@ def main(limit: int = 1, target_url: str | None = None,
         _ctrl_c_count += 1
         if _ctrl_c_count == 1:
             console.print("\n[yellow]Skipping current job(s)... (Ctrl+C again to STOP)[/yellow]")
-            # Kill all active Claude processes to skip current jobs
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
+            # Kill active Codex processes to skip the current jobs.
+            with _codex_lock:
+                for wid, cproc in list(_codex_procs.items()):
                     if cproc.poll() is None:
+                        _skip_workers.add(wid)
                         _kill_process_tree(cproc.pid)
         else:
             console.print("\n[red bold]STOPPING[/red bold]")
             _stop_event.set()
-            with _claude_lock:
-                for wid, cproc in list(_claude_procs.items()):
+            with _codex_lock:
+                for wid, cproc in list(_codex_procs.items()):
                     if cproc.poll() is None:
+                        _skip_workers.add(wid)
                         _kill_process_tree(cproc.pid)
             kill_all_chrome()
             raise KeyboardInterrupt
@@ -783,7 +859,8 @@ def main(limit: int = 1, target_url: str | None = None,
         totals = get_totals()
         console.print(
             f"\n[bold]Done: {total_applied} applied, {total_failed} failed "
-            f"(${totals['cost']:.3f})[/bold]"
+            f"(cost N/A, {totals['input_tokens']:,} input + "
+            f"{totals['output_tokens']:,} output tokens, {totals['turns']} Codex turns)[/bold]"
         )
         console.print(f"Logs: {config.LOG_DIR}")
 

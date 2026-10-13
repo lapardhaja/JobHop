@@ -1,4 +1,4 @@
-"""ApplyPilot first-time setup wizard.
+"""JobHop first-time setup wizard.
 
 Interactive flow that creates ~/.applypilot/ with:
   - resume.txt (and optionally resume.pdf)
@@ -81,7 +81,7 @@ def _setup_resume() -> None:
 
 def _setup_profile() -> dict:
     """Walk through profile questions and return a nested profile dict."""
-    console.print(Panel("[bold]Step 2: Profile[/bold]\nTell ApplyPilot about yourself. This powers scoring, tailoring, and auto-fill."))
+    console.print(Panel("[bold]Step 2: Profile[/bold]\nTell JobHop about yourself. This powers scoring, tailoring, and auto-fill."))
 
     profile: dict = {}
 
@@ -207,7 +207,7 @@ def _setup_searches() -> None:
 
     # Build YAML content
     lines = [
-        "# ApplyPilot search configuration",
+        "# JobHop search configuration",
         "# Edit this file to refine your job search queries.",
         "",
         "defaults:",
@@ -244,7 +244,7 @@ def _stored_env_values() -> dict[str, str]:
 def _update_env_file(updates: dict[str, str | None]) -> None:
     """Update backend settings while preserving unrelated .env entries."""
     existing = ENV_PATH.read_text(encoding="utf-8").splitlines() if ENV_PATH.exists() else [
-        "# ApplyPilot configuration",
+        "# JobHop configuration",
     ]
     assignment = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=")
     output: list[str] = []
@@ -279,7 +279,7 @@ def _setup_ai_features() -> None:
     ))
 
     if not Confirm.ask("Enable AI scoring and resume tailoring?", default=True):
-        console.print("[dim]Discovery-only mode. You can configure AI later with [bold]applypilot init[/bold].[/dim]")
+        console.print("[dim]Discovery-only mode. You can configure AI later with [bold]jobhop init[/bold].[/dim]")
         return
 
     env_values = _stored_env_values()
@@ -336,12 +336,12 @@ def _setup_auto_apply() -> None:
     """Configure autonomous job application (requires Codex CLI)."""
     console.print(Panel(
         "[bold]Step 5: Auto-Apply (optional)[/bold]\n"
-        "ApplyPilot can autonomously fill and submit job applications\n"
+        "JobHop can use Codex to fill and submit job applications\n"
         "using Codex CLI as the browser agent."
     ))
 
     if not Confirm.ask("Enable autonomous job applications?", default=True):
-        console.print("[dim]You can apply manually using the tailored resumes ApplyPilot generates.[/dim]")
+        console.print("[dim]You can apply manually using the tailored resumes JobHop generates.[/dim]")
         return
 
     # Check Codex CLI and the browser runtime.
@@ -384,7 +384,7 @@ def _setup_auto_apply() -> None:
                     encoding="utf-8",
                 )
         else:
-            ENV_PATH.write_text(f"# ApplyPilot configuration\nCAPSOLVER_API_KEY={capsolver_key}\n", encoding="utf-8")
+            ENV_PATH.write_text(f"# JobHop configuration\nCAPSOLVER_API_KEY={capsolver_key}\n", encoding="utf-8")
         console.print("[green]CapSolver key saved.[/green]")
     else:
         console.print("[dim]Skipped. Add CAPSOLVER_API_KEY to .env later if needed.[/dim]")
@@ -399,10 +399,10 @@ def run_wizard() -> None:
     console.print()
     console.print(
         Panel.fit(
-            "[bold green]ApplyPilot Setup Wizard[/bold green]\n\n"
+            "[bold green]JobHop Setup Wizard[/bold green]\n\n"
             "This will create your configuration at:\n"
             f"  [cyan]{APP_DIR}[/cyan]\n\n"
-            "You can re-run this anytime with [bold]applypilot init[/bold].",
+            "You can re-run this anytime with [bold]jobhop init[/bold].",
             border_style="green",
         )
     )

@@ -1,9 +1,20 @@
-# Changelog
+# JobHop Changelog
 
-All notable changes to ApplyPilot will be documented in this file.
+JobHop is a local fork of ApplyPilot. This file keeps the inherited ApplyPilot release history below and records changes made in this fork.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased] - JobHop local fork
+
+### Added
+- Codex CLI support as the default backend for text generation and browser automation.
+- The `jobhop` command and JobHop naming in the CLI, setup wizard, dashboard, and documentation.
+- A read-only apply preview that opens the target URL in a clean temporary Chrome profile before Codex starts, exposes only browser inspection tools, disables local shell/file/browser/computer-use/app/plugin/code-mode/subagent tools and Gmail, and withholds raw applicant materials and identifiers.
+
+### Changed
+- Required application answers must be supported by the applicant profile or tailored resume; unsupported answers stop for manual review.
+- The local source checkout uses its own virtual environment while retaining ApplyPilot's shared data directory and database format.
 
 ## [0.2.0] - 2026-02-17
 

@@ -34,7 +34,10 @@ class WorkerState:
     jobs_applied: int = 0
     jobs_failed: int = 0
     jobs_done: int = 0
-    total_cost: float = 0.0
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    total_turns: int = 0
+    total_cost: float | None = None
     log_file: Path | None = None
 
 
@@ -102,6 +105,8 @@ _STATUS_STYLES: dict[str, str] = {
     "expired": "dim red",
     "captcha": "magenta",
     "login_issue": "red",
+    "dry_run": "cyan",
+    "manual_review": "yellow",
     "done": "bold",
 }
 
@@ -112,7 +117,7 @@ def render_dashboard() -> Table:
     Returns:
         A Rich Table object ready for display.
     """
-    table = Table(title="ApplyPilot Dashboard", expand=True, show_lines=False)
+    table = Table(title="JobHop Dashboard", expand=True, show_lines=False)
     table.add_column("W", style="bold", width=3, justify="center")
     table.add_column("Job", min_width=30, max_width=50, no_wrap=True)
     table.add_column("Status", width=12, justify="center")
@@ -121,6 +126,9 @@ def render_dashboard() -> Table:
     table.add_column("Last Action", min_width=20, max_width=35, no_wrap=True)
     table.add_column("OK", width=4, justify="right", style="green")
     table.add_column("Fail", width=4, justify="right", style="red")
+    table.add_column("In Tok", width=9, justify="right")
+    table.add_column("Out Tok", width=9, justify="right")
+    table.add_column("Turns", width=6, justify="right")
     table.add_column("Cost", width=8, justify="right")
 
     with _lock:
@@ -128,7 +136,9 @@ def render_dashboard() -> Table:
 
     total_applied = 0
     total_failed = 0
-    total_cost = 0.0
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_turns = 0
 
     for s in states:
         elapsed = ""
@@ -149,17 +159,25 @@ def render_dashboard() -> Table:
             s.last_action[:35] if s.last_action else "",
             str(s.jobs_applied),
             str(s.jobs_failed),
-            f"${s.total_cost:.3f}" if s.total_cost else "",
+            f"{s.total_input_tokens:,}" if s.total_input_tokens else "",
+            f"{s.total_output_tokens:,}" if s.total_output_tokens else "",
+            str(s.total_turns) if s.total_turns else "",
+            "N/A" if s.total_cost is None else f"${s.total_cost:.3f}",
         )
         total_applied += s.jobs_applied
         total_failed += s.jobs_failed
-        total_cost += s.total_cost
+        total_input_tokens += s.total_input_tokens
+        total_output_tokens += s.total_output_tokens
+        total_turns += s.total_turns
 
     # Totals row
     table.add_section()
     table.add_row(
         "", "", "", "", "", "TOTAL",
-        str(total_applied), str(total_failed), f"${total_cost:.3f}",
+        str(total_applied), str(total_failed),
+        f"{total_input_tokens:,}" if total_input_tokens else "",
+        f"{total_output_tokens:,}" if total_output_tokens else "",
+        str(total_turns) if total_turns else "", "N/A",
         style="bold",
     )
 
@@ -190,14 +208,23 @@ def render_full() -> Table | Group:
     return table
 
 
-def get_totals() -> dict[str, int | float]:
+def get_totals() -> dict[str, int | None]:
     """Compute aggregate totals across all workers.
 
     Returns:
-        Dict with keys: applied, failed, cost.
+    Dict with applied/failed counts, unavailable monetary cost, and Codex usage.
     """
     with _lock:
         applied = sum(s.jobs_applied for s in _worker_states.values())
         failed = sum(s.jobs_failed for s in _worker_states.values())
-        cost = sum(s.total_cost for s in _worker_states.values())
-    return {"applied": applied, "failed": failed, "cost": cost}
+        input_tokens = sum(s.total_input_tokens for s in _worker_states.values())
+        output_tokens = sum(s.total_output_tokens for s in _worker_states.values())
+        turns = sum(s.total_turns for s in _worker_states.values())
+    return {
+        "applied": applied,
+        "failed": failed,
+        "cost": None,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "turns": turns,
+    }

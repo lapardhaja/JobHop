@@ -1,4 +1,4 @@
-"""ApplyPilot configuration: paths, platform detection, user data."""
+"""JobHop configuration, platform detection, and shared user data paths."""
 
 import os
 import platform
@@ -96,7 +96,7 @@ def load_profile() -> dict:
     import json
     if not PROFILE_PATH.exists():
         raise FileNotFoundError(
-            f"Profile not found at {PROFILE_PATH}. Run `applypilot init` first."
+            f"Profile not found at {PROFILE_PATH}. Run `jobhop init` first."
         )
     return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))
 
@@ -294,7 +294,7 @@ def check_tier(required: int, feature: str) -> None:
             missing.append("Codex sign-in — run [bold]codex login[/bold]")
     elif required >= 2 and provider == "api" and not _api_backend_configured():
         missing.append(
-            "API provider — add GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL to the ApplyPilot .env file"
+            "API provider — add GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL to the JobHop .env file"
         )
 
     if required >= 3:

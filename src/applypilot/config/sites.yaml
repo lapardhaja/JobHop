@@ -1,4 +1,4 @@
-# Direct career site registry for ApplyPilot
+# Direct career site registry for JobHop
 # Users can add their own sites following this pattern.
 # Use {location_encoded} placeholder for location (URL-encoded).
 # Use {query_encoded} placeholder for search terms (URL-encoded).

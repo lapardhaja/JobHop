@@ -1,13 +1,13 @@
-"""ApplyPilot Pipeline Orchestrator.
+"""JobHop pipeline orchestrator.
 
 Runs pipeline stages in sequence or concurrently (streaming mode).
 
 Usage (via CLI):
-    applypilot run                        # all stages, sequential
-    applypilot run --stream               # all stages, concurrent
-    applypilot run discover enrich        # specific stages
-    applypilot run score tailor cover     # LLM-only stages
-    applypilot run --dry-run              # preview without executing
+    jobhop run                        # all stages, sequential
+    jobhop run --stream               # all stages, concurrent
+    jobhop run discover enrich        # specific stages
+    jobhop run score tailor cover     # AI-only stages
+    jobhop run --dry-run              # preview without executing
 """
 
 from __future__ import annotations
@@ -475,7 +475,7 @@ def run_pipeline(
     mode = "streaming" if stream else "sequential"
     console.print()
     console.print(Panel.fit(
-        f"[bold]ApplyPilot Pipeline[/bold] ({mode})",
+        f"[bold]JobHop Pipeline[/bold] ({mode})",
         border_style="blue",
     ))
     console.print(f"  Min score:  {min_score}")

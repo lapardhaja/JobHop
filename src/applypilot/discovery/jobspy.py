@@ -1,7 +1,7 @@
 """JobSpy-based job discovery: searches Indeed, LinkedIn, Glassdoor, ZipRecruiter.
 
 Uses python-jobspy to scrape multiple job boards, deduplicates results,
-parses salary ranges, and stores everything in the ApplyPilot database.
+parses salary ranges, and stores everything in the JobHop database.
 
 Search queries, locations, and filtering rules are loaded from the user's
 search configuration YAML (searches.yaml) rather than being hardcoded.
@@ -457,7 +457,7 @@ def run_discovery(cfg: dict | None = None) -> dict:
         cfg = config.load_search_config()
 
     if not cfg:
-        log.warning("No search configuration found. Run `applypilot init` to create one.")
+        log.warning("No search configuration found. Run `jobhop init` to create one.")
         return {"new": 0, "existing": 0, "errors": 0, "db_total": 0, "queries": 0}
 
     proxy = cfg.get("proxy")

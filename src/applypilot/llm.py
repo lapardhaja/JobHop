@@ -1,4 +1,4 @@
-"""Unified text-generation client for ApplyPilot.
+"""Unified text-generation client for JobHop.
 
 Codex CLI is the default provider. Set ``APPLYPILOT_AI_PROVIDER=api`` to
 explicitly use the existing Gemini, OpenAI, or OpenAI-compatible API client.
@@ -329,7 +329,7 @@ class CodexClient:
         """Send a role-labeled transcript through Codex and return final text.
 
         ``temperature`` and ``max_tokens`` remain accepted for compatibility
-        with ApplyPilot's shared API-provider interface. Codex CLI does not
+        with JobHop's shared API-provider interface. Codex CLI does not
         offer equivalent per-invocation controls, so these values are not
         enforced in Codex mode.
         """

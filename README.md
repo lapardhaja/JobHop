@@ -1,18 +1,11 @@
-<!-- logo here -->
+> **JobHop** is an independent local fork of [ApplyPilot](https://github.com/Pickle-Pixel/ApplyPilot), the AGPL-3.0-only open-source project created by [Pickle-Pixel](https://github.com/Pickle-Pixel). This fork adds a Codex CLI backend and JobHop branding. The upstream ApplyPilot repository is unchanged by this fork.
 
-> **⚠️ ApplyPilot** is the original open-source project, created by [Pickle-Pixel](https://github.com/Pickle-Pixel) and first published on GitHub on **February 17, 2026**. We are **not affiliated** with applypilot.app, useapplypilot.com, or any other product using the "ApplyPilot" name. These sites are **not associated with this project** and may misrepresent what they offer. If you're looking for the autonomous, open-source job application agent — you're in the right place.
+# JobHop
 
-# ApplyPilot
+**Codex-powered job search and application workflow. Open source.**
 
-**Applied to 1,000 jobs in 2 days. Fully autonomous. Open source.**
-
-This local source fork adds a Codex CLI backend while keeping the upstream project and its AGPL-3.0-only license. Changes in this checkout are independent of the upstream repository until contributed there.
-
-[![PyPI version](https://img.shields.io/pypi/v/applypilot?color=blue)](https://pypi.org/project/applypilot/)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-green.svg)](LICENSE)
-[![GitHub stars](https://img.shields.io/github/stars/Pickle-Pixel/ApplyPilot?style=social)](https://github.com/Pickle-Pixel/ApplyPilot)
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/S6S01UL5IO)
 
 
 
@@ -24,7 +17,7 @@ https://github.com/user-attachments/assets/7ee3417f-43d4-4245-9952-35df1e77f2df
 
 ## What It Does
 
-ApplyPilot is a 6-stage autonomous job application pipeline. It discovers jobs across 5+ boards, scores them against your resume with AI, tailors your resume per job, writes cover letters, and **submits applications for you**. It navigates forms, uploads documents, answers screening questions, all hands-free.
+JobHop is a 6-stage job application pipeline. It discovers jobs across 5+ boards, scores them against your resume with AI, tailors your resume per job, writes cover letters, and can submit applications through a browser workflow.
 
 Install this source checkout in its own virtual environment, then run the pipeline:
 
@@ -35,18 +28,18 @@ python -m venv .venv
 python -m pip install -e .
 python -m pip install --no-deps python-jobspy
 python -m pip install pydantic tls-client requests markdownify regex curl_cffi
-applypilot init          # one-time setup: resume, profile, preferences, Codex or API backend
-applypilot doctor        # verify your setup — shows what's installed and what's missing
-applypilot run           # discover > enrich > score > tailor > cover letters
-applypilot run -w 4      # same but parallel (4 threads for discovery/enrichment)
-applypilot apply         # autonomous browser-driven submission
-applypilot apply -w 3    # parallel apply (3 Chrome instances)
-applypilot apply --dry-run --limit 1  # preview one job without submitting or changing status
+jobhop init          # one-time setup: resume, profile, preferences, Codex or API backend
+jobhop doctor        # verify your setup — shows what's installed and what's missing
+jobhop run           # discover > enrich > score > tailor > cover letters
+jobhop run -w 4      # same but parallel (4 threads for discovery/enrichment)
+jobhop apply         # browser-driven application workflow
+jobhop apply -w 3    # parallel apply (3 Chrome instances)
+jobhop apply --dry-run --limit 1  # preview one job without submitting or changing status
 ```
 
 > **Why two install commands?** `python-jobspy` pins an exact numpy version in its metadata that conflicts with pip's resolver, but works fine at runtime with any modern numpy. The `--no-deps` flag bypasses the resolver; the second command installs jobspy's actual runtime dependencies. Everything except `python-jobspy` installs normally.
 
-On Windows, activate the environment in PowerShell before running `applypilot`. This source checkout has a separate environment from any earlier pip installation. By default, both installations use the same `%USERPROFILE%\.applypilot` profile, database, and job data; set `APPLYPILOT_DIR` to use a different data directory.
+On Windows, activate the environment in PowerShell before running `jobhop`. This source checkout has a separate environment from any earlier pip installation. By default, JobHop and the upstream ApplyPilot installation use the same `%USERPROFILE%\.applypilot` profile, database, and job data; set `APPLYPILOT_DIR` to use a different data directory.
 
 ---
 
@@ -55,7 +48,7 @@ On Windows, activate the environment in PowerShell before running `applypilot`. 
 ### Full Pipeline (recommended)
 **Requires:** Python 3.11+, signed-in Codex CLI, Node.js 18+ (`npx`), Chrome
 
-Runs all 6 stages, from job discovery to autonomous application submission. This is the full power of ApplyPilot.
+Runs all 6 stages, from job discovery to browser-assisted application submission.
 
 ### Discovery + Tailoring Only
 **Requires:** Python 3.11+ and signed-in Codex CLI (default), or an explicitly selected API backend
@@ -79,9 +72,9 @@ Each stage is independent. Run them all or pick what you need.
 
 ---
 
-## ApplyPilot vs The Alternatives
+## JobHop vs The Alternatives
 
-| Feature | ApplyPilot | AIHawk | Manual |
+| Feature | JobHop | AIHawk | Manual |
 |---------|-----------|--------|--------|
 | Job discovery | 5 boards + Workday + direct sites | LinkedIn only | One board at a time |
 | AI scoring | 1-10 fit score per job | Basic filtering | Your gut feeling |
@@ -116,7 +109,7 @@ To use Codex, install the [Codex CLI](https://developers.openai.com/codex/cli) a
 
 ## Configuration
 
-All generated by `applypilot init`:
+All generated by `jobhop init`:
 
 ### `profile.json`
 Your personal data in one structured file: contact info, work authorization, compensation, experience, skills, resume facts (preserved during tailoring), and EEO defaults. Powers scoring, tailoring, and form auto-fill.
@@ -127,7 +120,7 @@ Job search queries, target titles, locations, boards. Run multiple searches with
 ### `.env`
 Backend and runtime config: `APPLYPILOT_AI_PROVIDER=codex` (default), optional `CODEX_MODEL`, and optional API settings. To use an API provider, set `APPLYPILOT_AI_PROVIDER=api`; `APPLYPILOT_API_PROVIDER` can select `gemini`, `openai`, or `local`. `CAPSOLVER_API_KEY` and `PROXY` remain optional runtime settings.
 
-### Package configs (shipped with ApplyPilot)
+### Package configs (shipped with JobHop)
 - `config/employers.yaml` - Workday employer registry (48 preconfigured)
 - `config/sites.yaml` - Direct career sites (30+), blocked sites, base URLs, manual ATS domains
 - `config/searches.example.yaml` - Example search configuration
@@ -154,16 +147,16 @@ Writes a targeted cover letter per job referencing the specific company, role, a
 ### Auto-Apply
 Codex CLI launches a worker-specific Chrome instance, uses its scoped Playwright MCP server to navigate application pages, fill forms, and upload the tailored resume and cover letter. It answers questions only from facts supported by your profile and resume; if a required answer is unsupported, it stops for manual review. A live dashboard shows progress in real time.
 
-The Playwright MCP server is configured per worker at runtime. The Codex shell sandbox stays read-only, and the run does not change global Codex settings.
+The Playwright MCP server is configured per worker at runtime, and the run does not change global Codex settings. Codex's shell sandbox stays read-only for live workers; preview runs disable shell/file access, native browser/computer-use, connected apps/plugins, code mode, subagents, and unrelated browser inspection actions.
 
-Start with `applypilot apply --dry-run --limit 1`. Preview mode can inspect and fill a form but never submits it, sends an application email, creates an employer account, or changes the job's saved application status. Email-only applications and account sign-up are skipped in preview mode.
+Start with `jobhop apply --dry-run --limit 1`. JobHop opens the job URL in a clean temporary Chrome profile before starting Codex, then Codex inspects the visible page. It receives only an allowlist of browser inspection tools; it cannot navigate elsewhere, use form actions or page code, or access Gmail. Local shell/file access, native browser/computer-use, connected apps/plugins, code mode, and subagent tools are disabled. Raw resume/cover-letter text and files, contact details, credentials, and document paths are withheld; only structured professional facts are provided for comparison. Preview never submits an application, creates an employer account, or changes the job's saved application status. A live run can fill and submit forms after you choose to run it without `--dry-run`.
 
 ```bash
 # Utility modes (no browser or Codex session needed)
-applypilot apply --mark-applied URL    # manually mark a job as applied
-applypilot apply --mark-failed URL     # manually mark a job as failed
-applypilot apply --reset-failed        # reset all failed jobs for retry
-applypilot apply --gen --url URL       # generate prompt file for manual debugging
+jobhop apply --mark-applied URL    # manually mark a job as applied
+jobhop apply --mark-failed URL     # manually mark a job as failed
+jobhop apply --reset-failed        # reset all failed jobs for retry
+jobhop apply --gen --url URL       # generate prompt file for manual debugging
 ```
 
 ---
@@ -171,23 +164,23 @@ applypilot apply --gen --url URL       # generate prompt file for manual debuggi
 ## CLI Reference
 
 ```
-applypilot init                         # First-time setup wizard
-applypilot doctor                       # Verify setup, diagnose missing requirements
-applypilot run [stages...]              # Run pipeline stages (or 'all')
-applypilot run --workers 4              # Parallel discovery/enrichment
-applypilot run --stream                 # Concurrent stages (streaming mode)
-applypilot run --min-score 8            # Override score threshold
-applypilot run --dry-run                # Preview without executing
-applypilot run --validation lenient     # Relax validation (recommended for Gemini free tier)
-applypilot run --validation strict      # Strictest validation (retries on any banned word)
-applypilot apply                        # Launch auto-apply
-applypilot apply --workers 3            # Parallel browser workers
-applypilot apply --dry-run --limit 1     # Preview one job without submit, email, account, or status changes
-applypilot apply --continuous           # Run forever, polling for new jobs
-applypilot apply --headless             # Headless browser mode
-applypilot apply --url URL              # Apply to a specific job
-applypilot status                       # Pipeline statistics
-applypilot dashboard                    # Open HTML results dashboard
+jobhop init                         # First-time setup wizard
+jobhop doctor                       # Verify setup, diagnose missing requirements
+jobhop run [stages...]              # Run pipeline stages (or 'all')
+jobhop run --workers 4              # Parallel discovery/enrichment
+jobhop run --stream                 # Concurrent stages (streaming mode)
+jobhop run --min-score 8            # Override score threshold
+jobhop run --dry-run                # Preview without executing
+jobhop run --validation lenient     # Relax validation (recommended for Gemini free tier)
+jobhop run --validation strict      # Strictest validation (retries on any banned word)
+jobhop apply                        # Launch auto-apply
+jobhop apply --workers 3            # Parallel browser workers
+jobhop apply --dry-run --limit 1     # Preview one job without submit, email, account, or status changes
+jobhop apply --continuous           # Run forever, polling for new jobs
+jobhop apply --headless             # Headless browser mode
+jobhop apply --url URL              # Apply to a specific job
+jobhop status                       # Pipeline statistics
+jobhop dashboard                    # Open HTML results dashboard
 ```
 
 ---
@@ -200,6 +193,6 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, 
 
 ## License
 
-ApplyPilot and this local source fork are licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
+JobHop is a local fork of ApplyPilot and is licensed under the [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0-only).
 
 You are free to use, modify, and distribute this software. If you deploy a modified version as a service, you must release your source code under the same license.

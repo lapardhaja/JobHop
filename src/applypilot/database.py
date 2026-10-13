@@ -1,4 +1,4 @@
-"""ApplyPilot database layer: schema, migrations, stats, and connection helpers.
+"""JobHop database layer: schema, migrations, stats, and connection helpers.
 
 Single source of truth for the jobs table schema. All columns from every
 pipeline stage are created up front so any stage can run independently

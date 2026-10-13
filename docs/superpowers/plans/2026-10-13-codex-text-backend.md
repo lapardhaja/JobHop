@@ -1,10 +1,10 @@
-# ApplyPilot Codex Text Backend Implementation Plan
+# JobHop Codex Text Backend Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox syntax for tracking.
 
-**Goal:** Route ApplyPilot's text-based AI work through the signed-in Codex CLI by default while keeping API providers available through explicit selection.
+**Goal:** Route JobHop's text-based AI work through the signed-in Codex CLI by default while keeping API providers available through explicit selection.
 
-**Architecture:** Add one reusable Codex CLI process/event adapter, then connect it to ApplyPilot's existing synchronous LLM interface. Update tier checks, the setup wizard, diagnostics, and documentation to reflect the Codex default. The browser application worker is described in the companion plan and consumes the same Codex process adapter.
+**Architecture:** Add one reusable Codex CLI process/event adapter, then connect it to the inherited synchronous LLM interface. Update tier checks, the setup wizard, diagnostics, and documentation to reflect the Codex default. The browser application worker is described in the companion plan and consumes the same Codex process adapter.
 
 **Tech Stack:** Python 3.11+, Typer, subprocess, Codex CLI `codex exec --json`, existing httpx provider implementation.
 
@@ -36,8 +36,8 @@
 - Create: `.venv/` (ignored local environment)
 
 - [ ] Add `.venv/` to `.gitignore` so the environment and installed packages cannot enter source commits.
-- [ ] Create `.venv` inside `ApplyPilot-Codex`, install this checkout with `python -m pip install -e .`, then install `python-jobspy` and the runtime dependencies listed in the upstream README.
-- [ ] Confirm all commands use `ApplyPilot-Codex\\.venv`; do not reuse or alter the earlier parent-directory `.venv`.
+- [ ] Create `.venv` inside `JobHop`, install this checkout with `python -m pip install -e .`, then install `python-jobspy` and the runtime dependencies listed in the upstream README.
+- [ ] Confirm all commands use `JobHop\\.venv`; do not reuse or alter the earlier parent-directory `.venv`.
 - [ ] Commit only `.gitignore` as `chore: ignore project-local virtual environment`.
 
 ### Task 2: Add the reusable Codex CLI process adapter
@@ -85,9 +85,9 @@
 
 - [ ] Update `get_tier()` so Tier 2 checks the selected text backend; Tier 3 always requires Codex CLI/sign-in, Chrome, and Node/npx even when the text backend is explicitly set to API.
 - [ ] Update `check_tier()` messages so Tier 2 never asks for an API key in Codex mode and Tier 3 names missing Codex, Chrome, or Node/npx requirements.
-- [ ] Update `applypilot doctor` to show selected backend/model, Codex CLI path, Codex sign-in status, API mode requirements, Chrome, and npx without exposing any secret values.
+- [ ] Update `jobhop doctor` to show selected backend/model, Codex CLI path, Codex sign-in status, API mode requirements, Chrome, and npx without exposing any secret values.
 - [ ] Update the doctor tier summary strings to describe Codex-based scoring/tailoring and auto-apply.
-- [ ] Commit diagnostics as `feat: diagnose Codex ApplyPilot requirements`.
+- [ ] Commit diagnostics as `feat: diagnose Codex JobHop requirements`.
 
 ### Task 5: Update first-run setup and text-backend documentation
 
@@ -104,4 +104,4 @@
 - [ ] Change `_setup_auto_apply()` and the wizard tier hints from Claude to Codex CLI, Chrome, and Node/npx.
 - [ ] Update `.env.example` with `APPLYPILOT_AI_PROVIDER=codex`, optional `CODEX_MODEL`, explicit API-mode examples, and the existing CapSolver/Proxy entries.
 - [ ] Update README setup, feature-stage descriptions, requirements, and environment variables to match the approved design and AGPL-3.0-only local fork.
-- [ ] Commit setup/docs as `docs: describe Codex as ApplyPilot's default AI backend`.
+- [ ] Commit setup/docs as `docs: describe Codex as JobHop's default AI backend`.

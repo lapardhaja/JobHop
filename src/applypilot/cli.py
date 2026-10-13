@@ -1,8 +1,9 @@
-"""ApplyPilot CLI — the main entry point."""
+"""JobHop CLI — the main entry point."""
 
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import typer
@@ -18,7 +19,7 @@ logging.basicConfig(
 )
 
 app = typer.Typer(
-    name="applypilot",
+    name="jobhop",
     help="AI-powered end-to-end job application pipeline.",
     no_args_is_help=True,
 )
@@ -45,7 +46,7 @@ def _bootstrap() -> None:
 
 def _version_callback(value: bool) -> None:
     if value:
-        console.print(f"[bold]applypilot[/bold] {__version__}")
+        console.print(f"[bold]JobHop[/bold] {__version__}")
         raise typer.Exit()
 
 
@@ -62,7 +63,7 @@ def main(
         is_eager=True,
     ),
 ) -> None:
-    """ApplyPilot — AI-powered end-to-end job application pipeline."""
+    """JobHop — Codex-powered job search and application workflow."""
 
 
 @app.command()
@@ -147,9 +148,12 @@ def apply(
     limit: Optional[int] = typer.Option(None, "--limit", "-l", help="Max applications to submit."),
     workers: int = typer.Option(1, "--workers", "-w", help="Number of parallel browser workers."),
     min_score: int = typer.Option(7, "--min-score", help="Minimum fit score for job selection."),
-    model: str = typer.Option("haiku", "--model", "-m", help="Claude model name."),
+    model: Optional[str] = typer.Option(None, "--model", "-m", help="Optional Codex model override."),
     continuous: bool = typer.Option(False, "--continuous", "-c", help="Run forever, polling for new jobs."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="Preview actions without submitting."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Preview without submission, email, account creation, or saved status changes.",
+    ),
     headless: bool = typer.Option(False, "--headless", help="Run browsers in headless mode."),
     url: Optional[str] = typer.Option(None, "--url", help="Apply to a specific job URL."),
     gen: bool = typer.Option(False, "--gen", help="Generate prompt file for manual debugging instead of running."),
@@ -164,7 +168,7 @@ def apply(
     from applypilot.config import check_tier, PROFILE_PATH as _profile_path
     from applypilot.database import get_connection
 
-    # --- Utility modes (no Chrome/Claude needed) ---
+    # --- Utility modes (no browser or Codex session needed) ---
 
     if mark_applied:
         from applypilot.apply.launcher import mark_job
@@ -185,15 +189,16 @@ def apply(
         return
 
     # --- Full apply mode ---
+    model = model or os.environ.get("CODEX_MODEL") or None
 
-    # Check 1: Tier 3 required (Claude Code CLI + Chrome)
+    # Check 1: Tier 3 required (Codex CLI + Chrome)
     check_tier(3, "auto-apply")
 
     # Check 2: Profile exists
     if not _profile_path.exists():
         console.print(
             "[red]Profile not found.[/red]\n"
-            "Run [bold]applypilot init[/bold] to create your profile first."
+            "Run [bold]jobhop init[/bold] to create your profile first."
         )
         raise typer.Exit(code=1)
 
@@ -206,12 +211,12 @@ def apply(
         if ready == 0:
             console.print(
                 "[red]No tailored resumes ready.[/red]\n"
-                "Run [bold]applypilot run score tailor[/bold] first to prepare applications."
+                "Run [bold]jobhop run score tailor[/bold] first to prepare applications."
             )
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt, BASE_CDP_PORT
+        from applypilot.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
@@ -220,14 +225,23 @@ def apply(
         if not prompt_file:
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
-        mcp_path = _profile_path.parent / ".mcp-apply-0.json"
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        console.print(f"\n[bold]Run manually:[/bold]")
-        console.print(
-            f"  claude --model {model} -p "
-            f"--mcp-config {mcp_path} "
-            f"--permission-mode bypassPermissions < {prompt_file}"
+        from applypilot.apply.launcher import _codex_mcp_overrides, BASE_CDP_PORT
+        codex_args = [
+            "codex", "exec", "--json", "--ephemeral", "--ignore-user-config",
+            "--sandbox", "read-only", "--skip-git-repo-check",
+        ]
+        if model:
+            codex_args.extend(["--model", model])
+        for override in _codex_mcp_overrides(BASE_CDP_PORT):
+            codex_args.extend(["--config", override])
+        codex_args.append("-")
+        rendered_args = " ".join(
+            f"'{arg.replace(chr(39), chr(39) * 2)}'" for arg in codex_args[1:]
         )
+        prompt_path = str(prompt_file).replace("'", "''")
+        console.print("\n[bold]Run manually from PowerShell (with worker Chrome running):[/bold]")
+        console.print(f"  Get-Content -Raw '{prompt_path}' | & 'codex' {rendered_args}")
         return
 
     from applypilot.apply.launcher import main as apply_main
@@ -237,7 +251,7 @@ def apply(
     console.print("\n[bold blue]Launching Auto-Apply[/bold blue]")
     console.print(f"  Limit:    {'unlimited' if continuous else effective_limit}")
     console.print(f"  Workers:  {workers}")
-    console.print(f"  Model:    {model}")
+    console.print(f"  Model:    {model or 'Codex CLI default'}")
     console.print(f"  Headless: {headless}")
     console.print(f"  Dry run:  {dry_run}")
     if url:
@@ -265,7 +279,7 @@ def status() -> None:
 
     stats = get_stats()
 
-    console.print("\n[bold]ApplyPilot Pipeline Status[/bold]\n")
+    console.print("\n[bold]JobHop Pipeline Status[/bold]\n")
 
     # Summary table
     summary = Table(title="Pipeline Overview", show_header=True, header_style="bold cyan")
@@ -354,7 +368,7 @@ def doctor() -> None:
     if PROFILE_PATH.exists():
         results.append(("profile.json", ok_mark, str(PROFILE_PATH)))
     else:
-        results.append(("profile.json", fail_mark, "Run 'applypilot init' to create"))
+        results.append(("profile.json", fail_mark, "Run 'jobhop init' to create"))
 
     # Resume
     if RESUME_PATH.exists():
@@ -362,13 +376,13 @@ def doctor() -> None:
     elif RESUME_PDF_PATH.exists():
         results.append(("resume.txt", warn_mark, "Only PDF found — plain-text needed for AI stages"))
     else:
-        results.append(("resume.txt", fail_mark, "Run 'applypilot init' to add your resume"))
+        results.append(("resume.txt", fail_mark, "Run 'jobhop init' to add your resume"))
 
     # Search config
     if SEARCH_CONFIG_PATH.exists():
         results.append(("searches.yaml", ok_mark, str(SEARCH_CONFIG_PATH)))
     else:
-        results.append(("searches.yaml", warn_mark, "Will use example config — run 'applypilot init'"))
+        results.append(("searches.yaml", warn_mark, "Will use example config — run 'jobhop init'"))
 
     # jobspy (discovery dep installed separately)
     try:
@@ -465,7 +479,7 @@ def doctor() -> None:
 
     # --- Render results ---
     console.print()
-    console.print("[bold]ApplyPilot Doctor[/bold]\n")
+    console.print("[bold]JobHop Doctor[/bold]\n")
 
     col_w = max(len(r[0]) for r in results) + 2
     for check, status, note in results:
