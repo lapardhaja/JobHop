@@ -17,7 +17,7 @@ The Codex backend is the default and requires no model API key. Existing Gemini,
 - `cli.doctor()` reports API-key and Claude requirements.
 - `applypilot.apply.launcher.run_job()` starts one Claude process per browser worker, feeds it a generated prompt, parses streamed JSON events, updates the dashboard, and reads a `RESULT:*` marker to update the database.
 - Each apply worker gets a Chrome DevTools port and a per-worker MCP configuration for Playwright and Gmail. The apply prompt has a dry-run mode.
-- The current apply prompt also instructs the agent to answer "yes" to some same-domain skills questions regardless of whether the applicant's profile or resume confirms that experience. This conflicts with the approved truthful-answer safeguard and must be corrected in the Codex prompt.
+- The current apply prompt instructs the agent to answer "yes" to some same-domain skills questions and supplies fixed answers for age, background checks, felony history, and prior employment without profile evidence. These conflict with the approved truthful-answer safeguard and must be corrected in the Codex prompt.
 - User-specific state lives under `%USERPROFILE%\\.applypilot` by default (`APPLYPILOT_DIR` can override it), independently of the Python source installation.
 
 ## Design
@@ -42,16 +42,16 @@ Replace the Claude-specific worker process with a Codex CLI worker while retaini
 - Start one `codex exec --json --ephemeral` process per application job and stream its JSONL events to the existing worker dashboard and log.
 - Use `--ignore-user-config` plus Codex's per-invocation config overrides to register the worker's Playwright MCP server at that worker's Chrome DevTools endpoint and the Gmail MCP server with the current restrictions on mail mutation. Do not edit the user's global Codex configuration; the desktop app and other CLI tasks must retain their settings.
 - Use the configured Codex model or an explicit ApplyPilot model override consistently for that worker. Run from the isolated ApplyPilot worker directory and pass only the job prompt and files already used by the current workflow.
-- Translate completed Codex tool-call events into dashboard action descriptions. Extract final assistant text from the documented message event and retain the existing `RESULT:APPLIED`, `RESULT:EXPIRED`, `RESULT:CAPTCHA`, `RESULT:LOGIN_ISSUE`, `RESULT:FAILED` contract.
-- Preserve Ctrl+C process-tree cleanup, timeouts, Chrome cleanup, worker isolation, and dry-run prompt behavior. The first integration run will use `applypilot apply --dry-run` so it fills forms without submitting.
-- Answer application questions from facts in the applicant's profile and resume. Do not claim skills, credentials, or experience that those sources do not establish. When a required answer cannot be supported, stop and flag it for manual review rather than guessing.
+- Translate completed Codex tool-call events into dashboard action descriptions. Extract final assistant text from the documented message event and retain the existing `RESULT:APPLIED`, `RESULT:EXPIRED`, `RESULT:CAPTCHA`, `RESULT:LOGIN_ISSUE`, and `RESULT:FAILED` contract, adding `RESULT:DRY_RUN` for preview-only runs.
+- Preserve Ctrl+C process-tree cleanup, timeouts, Chrome cleanup, and worker isolation. Make dry-run a preview-only outcome: do not submit a form, send an application email, create a site account, or mark the job applied/failed in the database. The first integration run will use `applypilot apply --dry-run`.
+- Answer application questions from facts in the applicant's profile and resume. Do not claim skills, credentials, or personal history that those sources do not establish. Remove unsupported fixed answers from the prompt. When a required answer cannot be supported, stop and flag it for manual review rather than guessing.
 - Keep Codex's built-in shell sandbox read-only, do not use its dangerous approval-and-sandbox bypass option, and configure only the MCP servers and permissions needed by this workflow. This leaves unrelated user-configured MCP servers unavailable to the job agent.
 - Claude-specific cost values are not available from Codex events. Show Codex token/turn usage when available; show monetary cost as unavailable instead of reporting a fabricated `$0.00`.
 
 ### 3. Setup, CLI, and user data
 
 - Keep this source copy and its virtual environment separate from the earlier pip installation. Both installations use the same `%USERPROFILE%\\.applypilot` data directory unless `APPLYPILOT_DIR` is set.
-- Update `applypilot doctor` and tier checks to report Codex CLI presence, `codex login status`, Chrome, and Node/npx. AI features require a working signed-in Codex CLI by default; they do not require an API key. API mode reports the selected API provider's requirements. Auto-apply also requires Chrome and Node/npx for Playwright MCP.
+- Update `applypilot doctor` and tier checks to report Codex CLI presence, `codex login status`, Chrome, and Node/npx. AI features require a working signed-in Codex CLI by default; they do not require an API key. API mode reports the selected API provider's requirements. Auto-apply always requires signed-in Codex CLI, Chrome, and Node/npx for Playwright MCP, even when text generation is explicitly configured for an API provider.
 - Update `applypilot init` and CLI help so they describe Codex as the default backend, expose the backend/model selection, and do not ask for an API key in Codex mode.
 - Keep `applypilot apply --dry-run`, explicit API-provider selection, profile/resume setup, manual ATS rules, blocked-site rules, and all existing application safeguards.
 - Keep the upstream AGPL-3.0-only license and document that this is a modified local source copy.
@@ -72,8 +72,8 @@ Replace the Claude-specific worker process with a Codex CLI worker while retaini
 
 - No rewrite of discovery sources, data model, database, dashboard, resume formats, scoring criteria, or ATS-specific behavior.
 - No automatic provider switching, changes to global Codex settings, or API-key transfer to Codex.
-- No submission of real job applications during setup or integration verification; the first run is dry-run.
-- No unsupported claims in application answers; profile/resume facts govern responses.
+- No application submission, email application, or account creation during dry-run; leave application status unchanged and available for a later run.
+- No unsupported claims or fixed personal-history answers in application answers; profile/resume facts govern responses.
 - No changes to the installed ApplyPilot virtual environment as part of building this separate copy.
 
 ## Completion criteria
@@ -82,4 +82,4 @@ Replace the Claude-specific worker process with a Codex CLI worker while retaini
 - The existing API providers work only when explicitly selected.
 - Setup and diagnostics explain whether Codex is installed and signed in, and name any missing browser-stage dependency.
 - Application progress, logs, result classification, worker cleanup, and database updates continue through the existing ApplyPilot workflow.
-- A first manual integration run can use dry-run to fill forms without submitting an application.
+- A first manual integration run can use dry-run to preview form filling without submitting, sending an email, creating an account, or changing application status.
