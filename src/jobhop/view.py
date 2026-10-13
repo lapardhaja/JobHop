@@ -17,8 +17,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from jobhop.config import APP_DIR, DB_PATH
+from jobhop.compensation import assess_salary, format_money, get_salary_floor
+from jobhop.config import APP_DIR, DB_PATH, load_profile, load_search_config
 from jobhop.database import get_connection
+from jobhop.eligibility import assess_location, is_student_role
 
 console = Console()
 
@@ -35,6 +37,17 @@ def generate_dashboard(output_path: str | None = None) -> str:
     out = Path(output_path) if output_path else APP_DIR / "dashboard.html"
 
     conn = get_connection()
+    try:
+        profile = load_profile()
+    except FileNotFoundError:
+        profile = {}
+    try:
+        search_config = load_search_config()
+    except FileNotFoundError:
+        search_config = {}
+    salary_floor = get_salary_floor(profile)
+    salary_currency = (profile.get("compensation") or {}).get("salary_currency", "USD")
+    salary_floor_label = format_money(salary_floor, salary_currency)
 
     # Stats
     total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
@@ -47,6 +60,12 @@ def generate_dashboard(output_path: str | None = None) -> str:
     ).fetchone()[0]
     high_fit = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE fit_score >= 7"
+    ).fetchone()[0]
+    duplicates_skipped = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'duplicate_applied'"
+    ).fetchone()[0]
+    location_review = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'location_review'"
     ).fetchone()[0]
 
     # Score distribution
@@ -76,11 +95,19 @@ def generate_dashboard(output_path: str | None = None) -> str:
     jobs = conn.execute("""
         SELECT url, title, salary, description, location, site, strategy,
                full_description, application_url, detail_error,
-               fit_score, score_reasoning
+               fit_score, score_reasoning, apply_status, duplicate_of
         FROM jobs
         WHERE fit_score >= 5
         ORDER BY fit_score DESC, site, title
     """).fetchall()
+
+    displayed_salary_assessments = [
+        assess_salary(row[0], salary_floor)
+        for row in conn.execute("SELECT salary FROM jobs WHERE fit_score >= 5").fetchall()
+    ]
+    below_floor_count = sum(item.status == "below_floor" for item in displayed_salary_assessments)
+    unknown_salary_count = sum(item.status == "unknown" for item in displayed_salary_assessments)
+    meets_floor_count = sum(item.status == "meets_floor" for item in displayed_salary_assessments)
 
     # Color map per site
     colors = {
@@ -149,6 +176,21 @@ def generate_dashboard(output_path: str | None = None) -> str:
         title = escape(j["title"] or "Untitled")
         url = escape(j["url"] or "")
         salary = escape(j["salary"] or "")
+        salary_assessment = assess_salary(j["salary"], salary_floor)
+        location_assessment = assess_location(
+            j["location"], j["full_description"], search_config
+        )
+        role_excluded = is_student_role(j["title"])
+        if salary_assessment.status == "meets_floor":
+            salary_eligibility_html = (
+                f'<span class="meta-tag salary-ok">Pay meets {escape(salary_floor_label)} floor</span>'
+            )
+        elif salary_assessment.status == "below_floor":
+            salary_eligibility_html = (
+                f'<span class="meta-tag salary-below">Below {escape(salary_floor_label)} floor · excluded</span>'
+            )
+        else:
+            salary_eligibility_html = '<span class="meta-tag salary-unknown">Pay unclear · review</span>'
         location = escape(j["location"] or "")
         site = escape(j["site"] or "")
         site_color = colors.get(j["site"] or "", "#6b7280")
@@ -170,16 +212,35 @@ def generate_dashboard(output_path: str | None = None) -> str:
         )
         if salary:
             meta_parts.append(f'<span class="meta-tag salary">{salary}</span>')
+        meta_parts.append(salary_eligibility_html)
         if location:
             meta_parts.append(f'<span class="meta-tag location">{location[:40]}</span>')
+        if j["apply_status"] == "location_review" or location_assessment.status == "unknown":
+            meta_parts.append('<span class="meta-tag location-review">Location unclear · review</span>')
+        if j["apply_status"] == "not_eligible_location" or location_assessment.status == "outside":
+            meta_parts.append('<span class="meta-tag location-review">Outside saved locations</span>')
+        if j["apply_status"] == "not_eligible_role" or role_excluded:
+            meta_parts.append('<span class="meta-tag location-review">Internship/co-op · excluded</span>')
         meta_html = " ".join(meta_parts)
 
         apply_html = ""
-        if apply_url:
+        if j["apply_status"] == "duplicate_applied":
+            apply_html = '<span class="apply-link" aria-disabled="true">Duplicate of an already-applied posting</span>'
+        elif j["apply_status"] == "applied":
+            apply_html = '<span class="apply-link" aria-disabled="true">Application recorded</span>'
+        elif j["apply_status"] == "location_review" or location_assessment.status == "unknown":
+            apply_html = '<span class="apply-link" aria-disabled="true">Confirm NYC or remote location before applying</span>'
+        elif j["apply_status"] == "not_eligible_location" or location_assessment.status == "outside":
+            apply_html = '<span class="apply-link" aria-disabled="true">Outside saved locations</span>'
+        elif j["apply_status"] == "not_eligible_role" or role_excluded:
+            apply_html = '<span class="apply-link" aria-disabled="true">Internship/co-op role excluded</span>'
+        elif apply_url and salary_assessment.status == "below_floor":
+            apply_html = '<span class="apply-link" aria-disabled="true">Excluded by salary floor</span>'
+        elif apply_url:
             apply_html = f'<a href="{apply_url}" class="apply-link" target="_blank">Apply</a>'
 
         job_sections += f"""
-        <div class="job-card" data-score="{score}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}">
+        <div class="job-card" data-score="{score}" data-salary="{salary_assessment.status}" data-site="{escape(j['site'] or '')}" data-location="{location.lower()}">
           <div class="card-header">
             <span class="score-pill" style="background:{'#10b981' if score >= 7 else '#f59e0b'}">{score}</span>
             <a href="{url}" class="job-title" target="_blank">{title}</a>
@@ -270,7 +331,12 @@ def generate_dashboard(output_path: str | None = None) -> str:
   .meta-row {{ display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }}
   .meta-tag {{ font-size: 0.72rem; padding: 0.15rem 0.5rem; border-radius: 4px; background: #334155; color: #94a3b8; }}
   .meta-tag.salary {{ background: #064e3b; color: #6ee7b7; }}
+  .meta-tag.salary-ok {{ background: #064e3b; color: #6ee7b7; }}
+  .meta-tag.salary-below {{ background: #7f1d1d; color: #fecaca; }}
+  .meta-tag.salary-unknown {{ background: #78350f; color: #fde68a; }}
   .meta-tag.location {{ background: #1e3a5f; color: #93c5fd; }}
+  .meta-tag.location-review {{ background: #78350f; color: #fde68a; }}
+  .pay-note {{ background: #1e293b; border-left: 3px solid #f59e0b; color: #cbd5e1; border-radius: 8px; padding: 0.85rem 1rem; margin: -1rem 0 1.5rem; font-size: 0.85rem; line-height: 1.5; }}
 
   .keywords-row {{ font-size: 0.75rem; color: #10b981; margin-bottom: 0.3rem; line-height: 1.4; }}
   .reasoning-row {{ font-size: 0.75rem; color: #94a3b8; margin-bottom: 0.5rem; font-style: italic; line-height: 1.4; }}
@@ -280,6 +346,7 @@ def generate_dashboard(output_path: str | None = None) -> str:
   .card-footer {{ display: flex; justify-content: flex-end; }}
   .apply-link {{ font-size: 0.8rem; color: #60a5fa; text-decoration: none; padding: 0.3rem 0.8rem; border: 1px solid #60a5fa33; border-radius: 6px; font-weight: 500; }}
   .apply-link:hover {{ background: #60a5fa22; }}
+  .apply-link[aria-disabled="true"] {{ color: #fecaca; border-color: #fecaca33; cursor: not-allowed; }}
 
   /* Expandable full description */
   .full-desc-details {{ margin-bottom: 0.75rem; }}
@@ -302,21 +369,30 @@ def generate_dashboard(output_path: str | None = None) -> str:
 <body>
 
 <h1>JobHop Dashboard</h1>
-<p class="subtitle">{total} jobs &middot; {scored} scored &middot; {high_fit} strong matches (7+)</p>
+<p class="subtitle">{total} jobs &middot; {scored} scored &middot; {high_fit} strong fit matches (7+)</p>
 
 <div class="summary">
   <div class="stat-card stat-total"><div class="stat-num">{total}</div><div class="stat-label">Total Jobs</div></div>
-  <div class="stat-card stat-ok"><div class="stat-num">{ready}</div><div class="stat-label">Ready (desc + URL)</div></div>
+  <div class="stat-card stat-ok"><div class="stat-num">{ready}</div><div class="stat-label">Details + application URL</div></div>
   <div class="stat-card stat-scored"><div class="stat-num">{scored}</div><div class="stat-label">Scored by LLM</div></div>
   <div class="stat-card stat-high"><div class="stat-num">{high_fit}</div><div class="stat-label">Strong Fit (7+)</div></div>
+  <div class="stat-card"><div class="stat-num">{duplicates_skipped}</div><div class="stat-label">Duplicate postings skipped</div></div>
+  <div class="stat-card"><div class="stat-num">{location_review}</div><div class="stat-label">Location needs review</div></div>
 </div>
+
+<p class="pay-note">Fit scores measure role/profile match, not salary eligibility. Salary floor: {escape(salary_floor_label) if salary_floor_label else 'not set'}/year &middot; {meets_floor_count} shown jobs meet it &middot; {below_floor_count} below-floor jobs are excluded from the apply queue &middot; {unknown_salary_count} have missing or unclear pay and remain visible for review.</p>
 
 <div class="filters">
   <span class="filter-label">Score:</span>
-  <button class="filter-btn active" onclick="filterScore(0)">All 5+</button>
-  <button class="filter-btn" onclick="filterScore(7)">7+ Strong</button>
-  <button class="filter-btn" onclick="filterScore(8)">8+ Excellent</button>
-  <button class="filter-btn" onclick="filterScore(9)">9+ Perfect</button>
+  <button class="filter-btn score-filter active" onclick="filterScore(0)">All 5+</button>
+  <button class="filter-btn score-filter" onclick="filterScore(7)">7+ Strong</button>
+  <button class="filter-btn score-filter" onclick="filterScore(8)">8+ Excellent</button>
+  <button class="filter-btn score-filter" onclick="filterScore(9)">9+ Perfect</button>
+  <span class="filter-label" style="margin-left:1rem">Pay:</span>
+  <button class="filter-btn salary-filter active" data-salary-filter="all" onclick="filterSalary('all', this)">All</button>
+  <button class="filter-btn salary-filter" data-salary-filter="meets_floor" onclick="filterSalary('meets_floor', this)">Floor met</button>
+  <button class="filter-btn salary-filter" data-salary-filter="below_floor" onclick="filterSalary('below_floor', this)">Below floor</button>
+  <button class="filter-btn salary-filter" data-salary-filter="unknown" onclick="filterSalary('unknown', this)">Pay unclear</button>
   <span class="filter-label" style="margin-left:1rem">Search:</span>
   <input type="text" class="search-input" placeholder="Filter by title, site..." oninput="filterText(this.value)">
 </div>
@@ -339,16 +415,24 @@ def generate_dashboard(output_path: str | None = None) -> str:
 <script>
 let minScore = 0;
 let searchText = '';
+let salaryFilter = 'all';
 
 function filterScore(min) {{
   minScore = min;
-  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.score-filter').forEach(b => b.classList.remove('active'));
   event.target.classList.add('active');
   applyFilters();
 }}
 
 function filterText(text) {{
   searchText = text.toLowerCase();
+  applyFilters();
+}}
+
+function filterSalary(status, button) {{
+  salaryFilter = status;
+  document.querySelectorAll('.salary-filter').forEach(b => b.classList.remove('active'));
+  button.classList.add('active');
   applyFilters();
 }}
 
@@ -360,8 +444,9 @@ function applyFilters() {{
     const score = parseInt(card.dataset.score) || 0;
     const text = card.textContent.toLowerCase();
     const scoreMatch = score >= (minScore || 5);
+    const salaryMatch = salaryFilter === 'all' || card.dataset.salary === salaryFilter;
     const textMatch = !searchText || text.includes(searchText);
-    if (scoreMatch && textMatch) {{
+    if (scoreMatch && salaryMatch && textMatch) {{
       card.classList.remove('hidden');
       shown++;
     }} else {{

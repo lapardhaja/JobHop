@@ -1,22 +1,23 @@
-"""Resume tailoring: LLM-powered ATS-optimized resume generation per job.
+"""Prepare per-job resumes while preserving the user's source document by default.
 
 THIS IS THE HEAVIEST REFACTOR. Every piece of personal data -- name, email, phone,
 skills, companies, projects, school -- is loaded at runtime from the user's profile.
 Zero hardcoded personal information.
 
-The LLM returns structured JSON, code assembles the final text. Header (name, contact)
-is always code-injected, never LLM-generated. Each retry starts a fresh conversation
-to avoid apologetic spirals.
+Source content is preserved unless the user explicitly opts into AI rewriting.
+When rewriting is enabled, the LLM returns structured JSON and code assembles the
+final text. Each retry starts a fresh conversation to avoid apologetic spirals.
 """
 
 import json
 import logging
 import re
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jobhop.config import RESUME_PATH, TAILORED_DIR, load_profile
+from jobhop.config import RESUME_PATH, RESUME_PDF_PATH, TAILORED_DIR, load_profile
 from jobhop.database import get_connection, get_jobs_by_stage
 from jobhop.llm import get_client
 from jobhop.scoring.validator import (
@@ -68,34 +69,34 @@ def _build_tailor_prompt(profile: dict) -> str:
     education = profile.get("experience", {})
     education_level = education.get("education_level", "")
 
-    return f"""You are a senior technical recruiter rewriting a resume to get this person an interview.
+    return f"""You are a resume editor adapting a resume for a specific job without changing the candidate's identity or facts.
 
 Take the base resume and job description. Return a tailored resume as a JSON object.
 
 ## RECRUITER SCAN (6 seconds):
-1. Title -- matches what they're hiring?
-2. Summary -- 2 sentences proving you've done this work
-3. First 3 bullets of most recent role -- verbs and outcomes match?
+1. Headline -- retain the candidate's source headline exactly
+2. Summary -- retain the source summary exactly
+3. First 3 bullets of most recent role -- keep their source wording
 4. Skills -- must-haves visible immediately?
 
 ## SKILLS BOUNDARY (real skills only):
 {skills_block}
 
-You MAY add 2-3 closely related tools (Kubernetes if Docker, Terraform if AWS, Redis if PostgreSQL). No unrelated languages/frameworks.
+Use only the skills and tools already present in the source resume.
 
 ## TAILORING RULES:
 
-TITLE: Match the target role. Keep seniority (Senior/Lead/Staff). Drop company suffixes and team names.
+HEADLINE AND ROLE TITLES: Copy the source resume headline and every experience title exactly. Never substitute the job's title for the candidate's title. The code preserves the source headline in the final document.
 
-SUMMARY: Rewrite from scratch. Lead with the 1-2 skills that matter most for THIS role. Sound like someone who's done this job.
+SUMMARY: Do not rewrite it. The code preserves the source summary exactly.
 
-SKILLS: Reorder each category so the job's must-haves appear first.
+SKILLS: Reorder only skills and categories already in the source resume. Do not add tools or rename categories.
 
-Reframe EVERY bullet for this role. Same real work, different angle. Every bullet must be reworded. Never copy verbatim.
+EXPERIENCE: Preserve every role title, employer, and date. Do not promote, demote, or rename a role.
 
-PROJECTS: Reorder by relevance. Drop irrelevant projects entirely.
+PROJECTS: Reorder existing projects by relevance. Preserve their names and facts.
 
-BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, Designed, Implemented, Reduced, Automated, Deployed, Operated, Optimized). Most relevant first. Max 4 per section.
+BULLETS: Use only bullet text copied verbatim from the source resume. You may reorder existing bullets within their original section, but do not rewrite, combine, split, add, or move them between roles. Include the original wording and numbers exactly.
 
 ## VOICE:
 - Write like a real engineer. Short, direct.
@@ -103,7 +104,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 - BAD: "Leveraged cutting-edge AI technologies to drive transformative operational efficiencies"
 - BANNED WORDS (using ANY of these = validation failure — do not use them even once):
   {banned_str}
-- No em dashes. Use commas, periods, or hyphens.
+- Preserve punctuation in copied source bullets.
 
 ## HARD RULES:
 - Do NOT invent work, companies, degrees, or certifications
@@ -114,7 +115,7 @@ BULLETS: Strong verb + what you built + quantified impact. Vary verbs (Built, De
 
 ## OUTPUT: Return ONLY valid JSON. No markdown fences. No commentary. No "here is" preamble.
 
-{{"title":"Role Title","summary":"2-3 tailored sentences.","skills":{{"Languages":"...","Frameworks":"...","DevOps & Infra":"...","Databases":"...","Tools":"..."}},"experience":[{{"header":"Title at Company","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2","bullet 3","bullet 4"]}}],"projects":[{{"header":"Project Name - Description","subtitle":"Tech | Dates","bullets":["bullet 1","bullet 2"]}}],"education":"{school} | {education_level}"}}"""
+{{"title":"Copy the source headline","summary":"Copy the source summary","skills":{{"source category":"source skills in relevance order"}},"experience":[{{"header":"Original role title and employer","subtitle":"Original tech and dates","bullets":["exact source bullet"]}}],"projects":[{{"header":"Original project name","subtitle":"Original tech","bullets":["exact source bullet"]}}],"education":"{school} | {education_level}"}}"""
 
 
 def _build_judge_prompt(profile: dict) -> str:
@@ -132,20 +133,17 @@ def _build_judge_prompt(profile: dict) -> str:
     real_metrics = resume_facts.get("real_metrics", [])
     metrics_str = ", ".join(real_metrics) if real_metrics else "N/A"
 
-    return f"""You are a resume quality judge. A tailoring engine rewrote a resume to target a specific job. Your job is to catch LIES, not style changes.
+    return f"""You are a resume accuracy judge. Check that the edited resume retains the candidate's identity and source facts.
 
 You must answer with EXACTLY this format:
 VERDICT: PASS or FAIL
 ISSUES: (list any problems, or "none")
 
-## CONTEXT -- what the tailoring engine was instructed to do (all of this is ALLOWED):
-- Change the title to match the target role
-- Rewrite the summary from scratch for the target job
-- Reorder bullets and projects to put the most relevant first
-- Reframe bullets to use the job's language
-- Drop low-relevance bullets and replace with more relevant ones from other sections
-- Reorder the skills section to put job-relevant skills first
-- Change tone and wording extensively
+## ALLOWED CHANGES:
+- Reorder existing skills within their source categories
+- Reorder existing projects and bullets within their original section
+
+The candidate headline, summary, experience titles, employers, dates, and bullet wording must remain faithful to the source. Rewritten or newly invented bullets, changed role titles, or a headline that claims the target job title are FAIL conditions.
 
 ## WHAT IS FABRICATION (FAIL for these):
 1. Adding tools, languages, or frameworks to TECHNICAL SKILLS that aren't in the original. The allowed skills are ONLY: {skills_str}
@@ -154,23 +152,10 @@ ISSUES: (list any problems, or "none")
 4. Adding companies, roles, or degrees that don't exist.
 5. Changing real numbers (inflating 80% to 95%, 500 nodes to 1000 nodes).
 
-## WHAT IS NOT FABRICATION (do NOT fail for these):
-- Rewording any bullet, even heavily, as long as the underlying work is real
-- Combining two original bullets into one
-- Splitting one original bullet into two
-- Describing the same work with different emphasis
-- Dropping bullets entirely
-- Reordering anything
-- Changing the title or summary completely
-
-## TOLERANCE RULE:
-The goal is to get interviews, not to be a perfect fact-checker. Allow up to 3 minor stretches per resume:
-- Adding a closely related tool the candidate could realistically know is a MINOR STRETCH, not fabrication.
-- Reframing a metric with slightly different wording is a MINOR STRETCH.
-- Adding any LEARNABLE skill given their existing stack is a MINOR STRETCH.
-- Only FAIL if there are MAJOR lies: completely invented projects, fake companies, fake degrees, wildly inflated numbers, or skills from a completely different domain.
-
-Be strict about major lies. Be lenient about minor stretches and learnable skills. Do not fail for style, tone, or restructuring."""
+## PASS CONDITIONS:
+- The headline, summary, role titles, employers, dates, and metrics match the source.
+- Every experience and project bullet is copied verbatim from the source.
+- Changes are limited to permitted reordering and removal of unrelated bullets or projects."""
 
 
 # ── JSON Extraction ───────────────────────────────────────────────────────
@@ -220,7 +205,7 @@ def extract_json(raw: str) -> dict:
 
 # ── Resume Assembly (profile-driven header) ──────────────────────────────
 
-def assemble_resume_text(data: dict, profile: dict) -> str:
+def assemble_resume_text(data: dict, profile: dict, source_resume: str = "") -> str:
     """Convert JSON resume data to formatted plain text.
 
     Header (name, location, contact) is ALWAYS code-injected from the profile,
@@ -236,31 +221,48 @@ def assemble_resume_text(data: dict, profile: dict) -> str:
     personal = profile.get("personal", {})
     lines: list[str] = []
 
-    # Header -- always code-injected from profile
-    lines.append(personal.get("full_name", ""))
-    lines.append(sanitize_text(data.get("title", "Software Engineer")))
+    # Keep identity and contact fields from the source. Target job titles never
+    # replace the candidate's own headline.
+    source_header = [line.strip() for line in source_resume.splitlines() if line.strip()]
+    lines.append(source_header[0] if source_header else personal.get("full_name", ""))
+    lines.append(
+        source_header[1]
+        if len(source_header) > 1
+        else sanitize_text(data.get("title", "Software Engineer"))
+    )
 
     # Location from search config or profile -- leave blank if not available
     # The location line is optional; the original used a hardcoded city.
     # We omit it here; the LLM prompt can include it if the user sets it.
 
-    # Contact line
-    contact_parts: list[str] = []
-    if personal.get("email"):
-        contact_parts.append(personal["email"])
-    if personal.get("phone"):
-        contact_parts.append(personal["phone"])
-    if personal.get("github_url"):
-        contact_parts.append(personal["github_url"])
-    if personal.get("linkedin_url"):
-        contact_parts.append(personal["linkedin_url"])
-    if contact_parts:
-        lines.append(" | ".join(contact_parts))
+    # Preserve the original contact line, including any portfolio URL.
+    if len(source_header) > 2:
+        lines.append(source_header[2])
+    else:
+        contact_parts: list[str] = []
+        if personal.get("email"):
+            contact_parts.append(personal["email"])
+        if personal.get("phone"):
+            contact_parts.append(personal["phone"])
+        if personal.get("github_url"):
+            contact_parts.append(personal["github_url"])
+        if personal.get("linkedin_url"):
+            contact_parts.append(personal["linkedin_url"])
+        if contact_parts:
+            lines.append(" | ".join(contact_parts))
     lines.append("")
 
     # Summary
     lines.append("SUMMARY")
-    lines.append(sanitize_text(data["summary"]))
+    source_summary = re.search(
+        r"(?ims)^\s*(?:professional\s+)?summary\s*\r?\n(.*?)(?=^\s*(?:technical\s+skills|professional\s+experience|experience)\s*$|\Z)",
+        source_resume,
+    )
+    lines.append(
+        source_summary.group(1).strip()
+        if source_summary
+        else sanitize_text(data["summary"])
+    )
     lines.append("")
 
     # Technical Skills
@@ -348,7 +350,7 @@ def tailor_resume(
     resume_text: str, job: dict, profile: dict,
     max_retries: int = 3, validation_mode: str = "normal",
 ) -> tuple[str, dict]:
-    """Generate a tailored resume via JSON output + fresh context on each retry.
+    """Prepare a resume; preserve source content unless rewriting is explicitly enabled.
 
     Key design choices:
     - LLM returns structured JSON, code assembles the text (no header leaks)
@@ -369,6 +371,28 @@ def tailor_resume(
     Returns:
         (tailored_text, report) where report contains validation details.
     """
+    # Preserve the uploaded resume byte-for-byte by default. The structured
+    # JSON rewrite below cannot represent every source section (for example,
+    # research experience, additional experience, and certifications), so it
+    # stays opt-in until the user explicitly enables content rewriting.
+    if not profile.get("allow_resume_rewriting", False):
+        validation = validate_tailored_resume(
+            resume_text, profile, original_text=resume_text
+        )
+        report = {
+            "attempts": 0,
+            "validator": validation,
+            "judge": {
+                "verdict": "SKIPPED",
+                "passed": True,
+                "issues": "Source resume preserved without AI rewriting.",
+            },
+            "status": "approved" if validation["passed"] else "failed_validation",
+            "validation_mode": "source_preserved",
+            "source_preserved": True,
+        }
+        return resume_text, report
+
     job_text = (
         f"TITLE: {job['title']}\n"
         f"COMPANY: {job['site']}\n"
@@ -410,7 +434,9 @@ def tailor_resume(
             continue
 
         # Layer 1: Validate JSON fields
-        validation = validate_json_fields(data, profile, mode=validation_mode)
+        validation = validate_json_fields(
+            data, profile, mode=validation_mode, original_text=resume_text
+        )
         report["validator"] = validation
 
         if not validation["passed"]:
@@ -419,12 +445,12 @@ def tailor_resume(
             if attempt < max_retries:
                 continue
             # Last attempt — assemble whatever we got
-            tailored = assemble_resume_text(data, profile)
+            tailored = assemble_resume_text(data, profile, resume_text)
             report["status"] = "failed_validation"
             return tailored, report
 
         # Assemble text (header injected by code, em dashes auto-fixed)
-        tailored = assemble_resume_text(data, profile)
+        tailored = assemble_resume_text(data, profile, resume_text)
 
         # Layer 2: LLM judge (catches subtle fabrication) — skipped in lenient mode
         if validation_mode == "lenient":
@@ -478,7 +504,7 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
         return {"approved": 0, "failed": 0, "errors": 0, "elapsed": 0.0}
 
     TAILORED_DIR.mkdir(parents=True, exist_ok=True)
-    log.info("Tailoring resumes for %d jobs (score >= %d)...", len(jobs), min_score)
+    log.info("Preparing resumes for %d jobs (score >= %d)...", len(jobs), min_score)
     t0 = time.time()
     completed = 0
     results: list[dict] = []
@@ -495,12 +521,19 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             safe_site = re.sub(r"[^\w\s-]", "", job["site"])[:20].strip().replace(" ", "_")
             prefix = f"{safe_site}_{safe_title}"
 
-            # Save tailored resume text
-            txt_path = TAILORED_DIR / f"{prefix}.txt"
+            # Never overwrite a resume a person may already have reviewed.
+            output_prefix = prefix
+            txt_path = TAILORED_DIR / f"{output_prefix}.txt"
+            revision = 1
+            while txt_path.exists():
+                marker = "_SourceFaithful" if revision == 1 else f"_SourceFaithful_{revision}"
+                output_prefix = f"{prefix}{marker}"
+                txt_path = TAILORED_DIR / f"{output_prefix}.txt"
+                revision += 1
             txt_path.write_text(tailored, encoding="utf-8")
 
             # Save job description for traceability
-            job_path = TAILORED_DIR / f"{prefix}_JOB.txt"
+            job_path = TAILORED_DIR / f"{output_prefix}_JOB.txt"
             job_desc = (
                 f"Title: {job['title']}\n"
                 f"Company: {job['site']}\n"
@@ -512,26 +545,33 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             job_path.write_text(job_desc, encoding="utf-8")
 
             # Save validation report
-            report_path = TAILORED_DIR / f"{prefix}_REPORT.json"
+            report_path = TAILORED_DIR / f"{output_prefix}_REPORT.json"
             report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 
-            # Generate PDF for approved resumes (best-effort)
-            # "approved_with_judge_warning" is also a success — resume was generated.
+            # A failed judge is not eligible for the apply queue.
             pdf_path = None
-            if report["status"] in ("approved", "approved_with_judge_warning"):
+            if report["status"] == "approved":
                 try:
-                    from jobhop.scoring.pdf import convert_to_pdf
-                    pdf_path = str(convert_to_pdf(txt_path))
+                    pdf_output = txt_path.with_suffix(".pdf")
+                    if not profile.get("allow_resume_rewriting", False) and RESUME_PDF_PATH.exists():
+                        shutil.copy2(RESUME_PDF_PATH, pdf_output)
+                        pdf_path = str(pdf_output)
+                    else:
+                        from jobhop.scoring.pdf import convert_to_pdf
+                        pdf_path = str(convert_to_pdf(txt_path))
                 except Exception:
                     log.debug("PDF generation failed for %s", txt_path, exc_info=True)
 
+            result_status = report["status"]
+            if result_status == "approved_with_judge_warning":
+                result_status = "failed_judge"
             result = {
                 "url": job["url"],
                 "path": str(txt_path),
                 "pdf_path": pdf_path,
                 "title": job["title"],
                 "site": job["site"],
-                "status": report["status"],
+                "status": result_status,
                 "attempts": report["attempts"],
             }
         except Exception as e:
@@ -555,9 +595,9 @@ def run_tailoring(min_score: int = 7, limit: int = 20,
             result["title"][:40],
         )
 
-    # Persist to DB: increment attempt counter for ALL, save path only for approved
+    # Persist to DB: save only validated, judge-passing resumes to the apply queue.
     now = datetime.now(timezone.utc).isoformat()
-    _success_statuses = {"approved", "approved_with_judge_warning"}
+    _success_statuses = {"approved"}
     for r in results:
         if r["status"] in _success_statuses:
             conn.execute(

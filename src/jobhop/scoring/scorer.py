@@ -34,6 +34,8 @@ IMPORTANT FACTORS:
 - Consider transferable experience (automation, scripting, API work)
 - Factor in the candidate's project experience
 - Be realistic about experience level vs. job requirements (years of experience, seniority)
+- Treat internships, co-ops, and apprenticeships as poor fits for a professional-role search unless the candidate explicitly lists student roles as a target.
+- Do not give a high score based on transferable technical skills alone when the job's level or work arrangement conflicts with the posting facts.
 
 RESPOND IN EXACTLY THIS FORMAT (no other text):
 SCORE: [1-10]

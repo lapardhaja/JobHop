@@ -129,7 +129,8 @@ def init_db(db_path: Path | str | None = None) -> sqlite3.Connection:
             last_attempted_at     TEXT,
             apply_duration_ms     INTEGER,
             apply_task_id         TEXT,
-            verification_confidence TEXT
+            verification_confidence TEXT,
+            duplicate_of          TEXT
         )
     """)
     conn.commit()
@@ -180,6 +181,7 @@ _ALL_COLUMNS: dict[str, str] = {
     "apply_duration_ms": "INTEGER",
     "apply_task_id": "TEXT",
     "verification_confidence": "TEXT",
+    "duplicate_of": "TEXT",
 }
 
 
@@ -232,10 +234,19 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         Dictionary with keys:
             total, by_site, pending_detail, with_description,
             scored, unscored, tailored, untailored_eligible,
-            with_cover_letter, applied, score_distribution
+            with_cover_letter, applied, duplicates_skipped, score_distribution,
+            ready_to_apply, salary_excluded, salary_unknown
     """
     if conn is None:
         conn = get_connection()
+
+    from jobhop.compensation import assess_salary, get_salary_floor
+    from jobhop.config import load_profile
+
+    try:
+        salary_floor = get_salary_floor(load_profile())
+    except FileNotFoundError:
+        salary_floor = None
 
     stats: dict = {}
 
@@ -312,16 +323,37 @@ def get_stats(conn: sqlite3.Connection | None = None) -> dict:
         "SELECT COUNT(*) FROM jobs WHERE applied_at IS NOT NULL"
     ).fetchone()[0]
 
+    stats["duplicates_skipped"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'duplicate_applied'"
+    ).fetchone()[0]
+
+    stats["role_excluded"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'not_eligible_role'"
+    ).fetchone()[0]
+
+    stats["location_excluded"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'not_eligible_location'"
+    ).fetchone()[0]
+
+    stats["location_review"] = conn.execute(
+        "SELECT COUNT(*) FROM jobs WHERE apply_status = 'location_review'"
+    ).fetchone()[0]
+
     stats["apply_errors"] = conn.execute(
         "SELECT COUNT(*) FROM jobs WHERE apply_error IS NOT NULL"
     ).fetchone()[0]
 
-    stats["ready_to_apply"] = conn.execute(
-        "SELECT COUNT(*) FROM jobs "
+    ready_salary_rows = conn.execute(
+        "SELECT salary FROM jobs "
         "WHERE tailored_resume_path IS NOT NULL "
         "AND applied_at IS NULL "
+        "AND (apply_status IS NULL OR apply_status = 'failed') "
         "AND application_url IS NOT NULL"
-    ).fetchone()[0]
+    ).fetchall()
+    salary_assessments = [assess_salary(row[0], salary_floor) for row in ready_salary_rows]
+    stats["salary_excluded"] = sum(item.status == "below_floor" for item in salary_assessments)
+    stats["salary_unknown"] = sum(item.status == "unknown" for item in salary_assessments)
+    stats["ready_to_apply"] = len(ready_salary_rows) - stats["salary_excluded"]
 
     return stats
 
@@ -393,6 +425,7 @@ def get_jobs_by_stage(conn: sqlite3.Connection | None = None,
         "tailored": "tailored_resume_path IS NOT NULL",
         "pending_apply": (
             "tailored_resume_path IS NOT NULL AND applied_at IS NULL "
+            "AND COALESCE(apply_status, '') != 'duplicate_applied' "
             "AND application_url IS NOT NULL"
         ),
         "applied": "applied_at IS NOT NULL",

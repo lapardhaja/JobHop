@@ -10,10 +10,12 @@ import os
 import re
 import shutil
 from datetime import datetime
+from decimal import Decimal, ROUND_CEILING
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from jobhop import config
+from jobhop.compensation import ANNUAL_WORK_HOURS, format_money, get_salary_floor
 
 logger = logging.getLogger(__name__)
 
@@ -194,57 +196,38 @@ def _build_location_check(profile: dict, search_config: dict) -> str:
 Read the job page. Determine the work arrangement. Then decide:
 - "Remote" or "work from anywhere" -> ELIGIBLE. Apply.
 - "Hybrid" or "onsite" in {city_list} -> ELIGIBLE. Apply.
-- "Hybrid" or "onsite" in another city BUT the posting also says "remote OK" or "remote option available" -> ELIGIBLE. Apply.
-- "Onsite only" or "hybrid only" in any city outside the list above with NO remote option -> NOT ELIGIBLE. Stop immediately. Output RESULT:FAILED:not_eligible_location
+- A posting in another city is eligible only when it explicitly allows the job to be performed fully remotely from {city_list}.
+- "Onsite only" or "hybrid only" outside the list above, without a fully remote option from {city_list} -> NOT ELIGIBLE. Stop immediately. Output RESULT:FAILED:not_eligible_location
 - City is overseas (India, Philippines, Europe, etc.) with no remote option -> NOT ELIGIBLE. Output RESULT:FAILED:not_eligible_location
-- Cannot determine location -> Continue applying. If a screening question reveals it's non-local onsite, answer honestly and let the system reject if needed.
+- Cannot determine the location or whether remote work is allowed -> DO NOT APPLY. Stop immediately. Output RESULT:FAILED:needs_location_review
 Do NOT fill out forms for jobs that are clearly onsite in a non-acceptable location. Check EARLY, save time."""
 
 
 def _build_salary_section(profile: dict) -> str:
-    """Build the salary negotiation instructions.
-
-    Adapts floor, range, and currency from the profile's compensation section.
-    """
+    """Build strict salary-floor instructions from the saved profile."""
     comp = profile["compensation"]
     currency = comp.get("salary_currency", "USD")
-    floor = comp["salary_expectation"]
-    range_min = comp.get("salary_range_min") or floor
-    range_max = comp.get("salary_range_max") or ""
-    if range_max:
-        range_guidance = f'"${range_min}-${range_max} {currency}"'
-    else:
-        range_guidance = f'"${range_min}+ {currency}"'
-    conversion_note = comp.get("currency_conversion_note", "")
+    floor = get_salary_floor(profile)
+    if floor is None:
+        return """== SALARY ELIGIBILITY ==
+The profile has no valid annual salary floor. Do not guess a minimum; pause and ask the applicant before answering compensation questions."""
 
-    # Compute example hourly rates at 3 salary levels
-    try:
-        floor_int = int(floor)
-        examples = [
-            (f"${floor_int // 1000}K", floor_int // 2080),
-            (f"${(floor_int + 25000) // 1000}K", (floor_int + 25000) // 2080),
-            (f"${(floor_int + 55000) // 1000}K", (floor_int + 55000) // 2080),
-        ]
-        hourly_line = ", ".join(f"{sal} = ${hr}/hr" for sal, hr in examples)
-    except (ValueError, TypeError):
-        hourly_line = "Divide annual salary by 2080"
-
-    # Currency conversion guidance
-    if conversion_note:
-        convert_line = f"Posting is in a different currency? -> {conversion_note}"
-    else:
-        convert_line = "Posting is in a different currency? -> Target midpoint of their range. Convert if needed."
+    floor_display = format_money(floor, currency)
+    hourly_floor = (floor / ANNUAL_WORK_HOURS).quantize(
+        Decimal("0.01"), rounding=ROUND_CEILING
+    )
+    hourly_display = format_money(hourly_floor, currency)
 
     return f"""== SALARY (think, don't just copy) ==
-${floor} {currency} is the FLOOR. Never go below it. But don't always use it either.
+The applicant's absolute minimum is {floor_display} {currency} per year. Never state, accept, or enter compensation below this floor. This floor overrides title-based defaults and posted-range midpoint suggestions.
 
-Decision tree:
-1. Job posting shows a range (e.g. "$120K-$160K")? -> Answer with the MIDPOINT ($140K).
-2. Title says Senior, Staff, Lead, Principal, Architect, or level II/III/IV? -> Minimum $110K {currency}. Use midpoint of posted range if higher.
-3. {convert_line}
-4. No salary info anywhere? -> Use ${floor} {currency}.
-5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> {range_guidance}.
-6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line})"""
+Eligibility and answers:
+1. Check compensation in the listing and application. If the top of an advertised annual range is below {floor_display}, stop and output RESULT:FAILED:not_eligible_salary.
+2. Annualize hourly compensation using {ANNUAL_WORK_HOURS} hours/year. The minimum equivalent hourly rate is {hourly_display} {currency}/hour. If the maximum hourly rate is below it, stop and output RESULT:FAILED:not_eligible_salary.
+3. If an advertised range reaches the floor, a single expected-salary answer may use its midpoint only when that midpoint is at least {floor_display}; otherwise use {floor_display}, provided it is within the employer's range. If the form only accepts below-floor values, stop with RESULT:FAILED:not_eligible_salary.
+4. For a salary-range question, never enter a lower bound below {floor_display}. Use the posted maximum as the upper bound when the form requires one and that maximum is above the floor; otherwise answer {floor_display}+ when accepted.
+5. If no compensation is disclosed, use {floor_display} as the minimum expectation when asked. Do not invent a current salary or claim an offer is acceptable below the floor.
+6. If the posting uses another currency or an unclear pay period, do not guess. If you cannot confidently compare it to this annual floor, stop and ask the applicant."""
 
 
 def _build_screening_section(profile: dict) -> str:

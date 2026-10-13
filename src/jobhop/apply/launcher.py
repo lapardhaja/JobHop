@@ -19,13 +19,16 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from rich.console import Console
 from rich.live import Live
 
 from jobhop import config
 from jobhop.codex import CodexExecutionError, CodexResult, run_codex_exec
+from jobhop.compensation import assess_salary, get_salary_floor
 from jobhop.database import get_connection
+from jobhop.eligibility import assess_location, is_student_role
 from jobhop.apply import chrome, dashboard, prompt as prompt_mod
 from jobhop.apply.chrome import (
     launch_chrome, cleanup_worker, kill_all_chrome,
@@ -112,7 +115,9 @@ def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
             "features.apps=false",
             "features.plugins=false",
             "features.remote_plugin=false",
-            "features.code_mode_host=false",
+            # MCP browser tools are hosted through Codex's code-mode host.
+            # Keep the host enabled while shell and unrelated integrations stay off.
+            "features.code_mode_host=true",
         ])
     return overrides
 
@@ -120,6 +125,140 @@ def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
 # ---------------------------------------------------------------------------
 # Database operations
 # ---------------------------------------------------------------------------
+
+_TRACKING_QUERY_KEYS = {
+    "campaign", "campaignid", "gh_src", "lever-source", "ref", "ref_id",
+    "referrer", "tracking", "trk",
+}
+_JOB_BOARD_SOURCE_VALUES = {
+    "dice", "google", "indeed", "linkedin", "monster", "talent.com",
+    "zip_recruiter", "zip-recruiter",
+}
+
+
+def canonical_application_destination(url: str | None, listing_url: str | None = None) -> str:
+    """Normalize an application URL so tracking variants identify one destination."""
+    if not url or not url.strip():
+        return ""
+
+    try:
+        parts = urlsplit(urljoin(listing_url or "", url.strip()))
+    except ValueError:
+        return ""
+    if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+        return ""
+
+    host = parts.hostname.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        return ""
+    netloc = host
+    if port and not (
+        (parts.scheme.lower() == "http" and port == 80)
+        or (parts.scheme.lower() == "https" and port == 443)
+    ):
+        netloc = f"{host}:{port}"
+
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_")
+        and key.lower() not in _TRACKING_QUERY_KEYS
+        and not (
+            key.lower() in {"source", "src"}
+            and value.strip().casefold() in _JOB_BOARD_SOURCE_VALUES
+        )
+    ]
+    path = parts.path.rstrip("/") or "/"
+    return urlunsplit(("https", netloc, path, urlencode(sorted(query)), parts.fragment))
+
+
+def _destination_statuses(conn) -> tuple[dict[str, str], set[str]]:
+    """Return applied destination keys and destinations currently being handled."""
+    rows = conn.execute("""
+        SELECT url, application_url, apply_status, applied_at
+        FROM jobs
+        WHERE applied_at IS NOT NULL
+           OR apply_status IN ('applied', 'in_progress')
+    """).fetchall()
+    applied: dict[str, str] = {}
+    in_progress: set[str] = set()
+    for row in rows:
+        destination = canonical_application_destination(
+            row["application_url"] or row["url"], row["url"]
+        )
+        if not destination:
+            continue
+        if row["applied_at"] is not None or row["apply_status"] == "applied":
+            applied.setdefault(destination, row["url"])
+        elif row["apply_status"] == "in_progress":
+            in_progress.add(destination)
+    return applied, in_progress
+
+
+def _mark_duplicate_destination_rows(conn, applied_url: str) -> int:
+    """Record existing rows that share a completed application's destination."""
+    source = conn.execute(
+        "SELECT url, application_url FROM jobs WHERE url = ?", (applied_url,)
+    ).fetchone()
+    if not source:
+        return 0
+    destination = canonical_application_destination(
+        source["application_url"] or source["url"], source["url"]
+    )
+    if not destination:
+        return 0
+
+    marked = 0
+    siblings = conn.execute("""
+        SELECT url, application_url, apply_status, applied_at
+        FROM jobs
+        WHERE url != ?
+    """, (source["url"],)).fetchall()
+    for sibling in siblings:
+        if sibling["applied_at"] is not None or sibling["apply_status"] in {"applied", "in_progress"}:
+            continue
+        sibling_destination = canonical_application_destination(
+            sibling["application_url"] or sibling["url"], sibling["url"]
+        )
+        if sibling_destination != destination:
+            continue
+        cursor = conn.execute("""
+            UPDATE jobs
+            SET apply_status = 'duplicate_applied', duplicate_of = ?,
+                apply_error = NULL, agent_id = NULL
+            WHERE url = ? AND applied_at IS NULL
+              AND (apply_status IS NULL OR apply_status != 'in_progress')
+        """, (source["url"], sibling["url"]))
+        marked += cursor.rowcount
+    return marked
+
+
+def _record_duplicate_candidate(conn, candidate_url: str, applied_url: str) -> None:
+    """Persist why a not-yet-applied posting is excluded from the queue."""
+    conn.execute("""
+        UPDATE jobs
+        SET apply_status = 'duplicate_applied', duplicate_of = ?,
+            apply_error = NULL, agent_id = NULL
+        WHERE url = ? AND applied_at IS NULL
+          AND (apply_status IS NULL OR apply_status IN ('failed', 'location_review', 'not_eligible_location'))
+    """, (applied_url, candidate_url))
+
+
+def _record_eligibility_status(conn, candidate_url: str, status: str) -> int:
+    """Persist a non-application eligibility state for later review or retry."""
+    cursor = conn.execute("""
+        UPDATE jobs SET apply_status = ?, agent_id = NULL
+        WHERE url = ? AND applied_at IS NULL
+          AND (apply_status IS NULL OR apply_status IN ('failed', 'location_review', 'not_eligible_location'))
+    """, (status, candidate_url))
+    return cursor.rowcount
+
 
 def acquire_job(target_url: str | None = None, min_score: int = 7,
                 worker_id: int = 0, dry_run: bool = False) -> dict | None:
@@ -136,6 +275,16 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
     conn = get_connection()
     try:
         conn.execute("BEGIN IMMEDIATE")
+        try:
+            salary_floor = get_salary_floor(config.load_profile())
+        except FileNotFoundError:
+            salary_floor = None
+        applied_destinations, in_progress_destinations = _destination_statuses(conn)
+        duplicate_updates = 0
+        eligibility_updates = 0
+        role_skipped = 0
+        location_skipped = 0
+        search_config = config.load_search_config()
         excluded_patterns = config.load_excluded_job_urls()
         exclusion_clause = ""
         exclusion_params: list[str] = []
@@ -146,17 +295,70 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
 
         if target_url:
             like = f"%{target_url.split('?')[0].rstrip('/')}%"
-            row = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
+                       salary,
                        fit_score, location, full_description, cover_letter_path,
-                       apply_status, agent_id, last_attempted_at
+                       apply_status, agent_id, last_attempted_at, applied_at
                 FROM jobs
                 WHERE (url = ? OR application_url = ? OR application_url LIKE ? OR url LIKE ?)
                   AND tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status != 'in_progress')
+                  AND applied_at IS NULL
+                  AND (apply_status IS NULL OR apply_status IN ('failed', 'location_review', 'not_eligible_location'))
                   {exclusion_clause}
+                ORDER BY fit_score DESC, discovered_at DESC
                 LIMIT 1
-            """, (target_url, target_url, like, like, *exclusion_params)).fetchone()
+            """, (target_url, target_url, like, like, *exclusion_params)).fetchall()
+            row = None
+            if rows:
+                candidate = rows[0]
+                can_select = True
+                if is_student_role(candidate["title"]):
+                    role_skipped += 1
+                    can_select = False
+                    if not dry_run:
+                        eligibility_updates += _record_eligibility_status(
+                            conn, candidate["url"], "not_eligible_role"
+                        )
+                else:
+                    location = assess_location(
+                        candidate["location"], candidate["full_description"], search_config
+                    )
+                    if location.status == "outside":
+                        location_skipped += 1
+                        can_select = False
+                        if not dry_run:
+                            eligibility_updates += _record_eligibility_status(
+                                conn, candidate["url"], "not_eligible_location"
+                            )
+                    elif location.status == "unknown" and not dry_run:
+                        location_skipped += 1
+                        can_select = False
+                        eligibility_updates += _record_eligibility_status(
+                            conn, candidate["url"], "location_review"
+                        )
+                if can_select:
+                    candidate = dict(candidate)
+                    if location.status == "unknown":
+                        candidate["_location_review"] = True
+                    elif candidate.get("apply_status") in {"location_review", "not_eligible_location"}:
+                        if not dry_run:
+                            candidate["apply_status"] = None
+                            conn.execute(
+                                "UPDATE jobs SET apply_status = NULL WHERE url = ?",
+                                (candidate["url"],),
+                            )
+                    destination = canonical_application_destination(
+                        candidate["application_url"] or candidate["url"], candidate["url"]
+                    )
+                    if destination in applied_destinations:
+                        if not dry_run:
+                            _record_duplicate_candidate(
+                                conn, candidate["url"], applied_destinations[destination]
+                            )
+                            duplicate_updates += 1
+                    elif destination not in in_progress_destinations:
+                        row = candidate
         else:
             blocked_sites, blocked_patterns = _load_blocked()
             # Build parameterized filters to avoid SQL injection
@@ -171,28 +373,112 @@ def acquire_job(target_url: str | None = None, min_score: int = 7,
                 url_clauses = " ".join(f"AND url NOT LIKE ?" for _ in blocked_patterns)
                 params.extend(blocked_patterns)
             params.extend(exclusion_params)
-            row = conn.execute(f"""
+            rows = conn.execute(f"""
                 SELECT url, title, site, application_url, tailored_resume_path,
+                       salary,
                        fit_score, location, full_description, cover_letter_path,
-                       apply_status, agent_id, last_attempted_at
+                       apply_status, agent_id, last_attempted_at, applied_at
                 FROM jobs
                 WHERE tailored_resume_path IS NOT NULL
-                  AND (apply_status IS NULL OR apply_status = 'failed')
+                  AND applied_at IS NULL
+                  AND (apply_status IS NULL OR apply_status IN ('failed', 'location_review', 'not_eligible_location'))
                   AND (apply_attempts IS NULL OR apply_attempts < ?)
                   AND fit_score >= ?
                   {site_clause}
                   {url_clauses}
                   {exclusion_clause}
                 ORDER BY fit_score DESC, url
-                LIMIT 1
-            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchone()
+            """, [config.DEFAULTS["max_apply_attempts"]] + params).fetchall()
+            # The fit score reflects role/profile fit. Pay is a separate
+            # eligibility gate: known compensation below the profile floor
+            # must never reach a browser worker.
+            row = None
+            salary_skipped = 0
+            for candidate in rows:
+                if is_student_role(candidate["title"]):
+                    role_skipped += 1
+                    if not dry_run:
+                        eligibility_updates += _record_eligibility_status(
+                            conn, candidate["url"], "not_eligible_role"
+                        )
+                    continue
+                location = assess_location(
+                    candidate["location"], candidate["full_description"], search_config
+                )
+                if location.status == "outside":
+                    location_skipped += 1
+                    if not dry_run:
+                        eligibility_updates += _record_eligibility_status(
+                            conn, candidate["url"], "not_eligible_location"
+                        )
+                    continue
+                if location.status == "unknown" and not dry_run:
+                    location_skipped += 1
+                    eligibility_updates += _record_eligibility_status(
+                        conn, candidate["url"], "location_review"
+                    )
+                    continue
+                destination = canonical_application_destination(
+                    candidate["application_url"] or candidate["url"], candidate["url"]
+                )
+                if destination in applied_destinations:
+                    if not dry_run:
+                        _record_duplicate_candidate(
+                            conn, candidate["url"], applied_destinations[destination]
+                        )
+                        duplicate_updates += 1
+                    continue
+                if destination in in_progress_destinations:
+                    continue
+                assessment = assess_salary(candidate["salary"], salary_floor)
+                if assessment.status == "below_floor":
+                    salary_skipped += 1
+                    continue
+                if candidate["apply_status"] in {"location_review", "not_eligible_location"}:
+                    candidate = dict(candidate)
+                    if not dry_run:
+                        candidate["apply_status"] = None
+                        conn.execute(
+                            "UPDATE jobs SET apply_status = NULL WHERE url = ?",
+                            (candidate["url"],),
+                        )
+                if location.status == "unknown":
+                    candidate = dict(candidate)
+                    candidate["_location_review"] = True
+                row = candidate
+                break
+            if salary_skipped:
+                logger.info(
+                    "Skipped %d job(s) below the saved salary floor while selecting an application.",
+                    salary_skipped,
+                )
 
+        if role_skipped:
+            logger.info("Skipped %d internship/co-op/apprenticeship posting(s).", role_skipped)
+        if location_skipped:
+            logger.info("Skipped %d posting(s) outside or missing the saved location preference.", location_skipped)
         if not row:
-            conn.rollback()
+            if duplicate_updates or eligibility_updates:
+                conn.commit()
+            else:
+                conn.rollback()
             return None
 
         job = dict(row)
         previous_status = row["apply_status"]
+        salary_assessment = assess_salary(job.get("salary"), salary_floor)
+        if salary_assessment.status == "below_floor":
+            job["_salary_ineligible"] = True
+            job["_salary_reason"] = salary_assessment.reason
+            job["_salary_eligibility"] = salary_assessment.status
+            job["_previous_apply_status"] = previous_status
+            job["_previous_agent_id"] = row["agent_id"]
+            job["_previous_last_attempted_at"] = row["last_attempted_at"]
+            conn.rollback()
+            return job
+
+        job["_salary_eligibility"] = salary_assessment.status
+        job["_salary_reason"] = salary_assessment.reason
         job["_previous_agent_id"] = row["agent_id"]
         job["_previous_last_attempted_at"] = row["last_attempted_at"]
 
@@ -243,6 +529,7 @@ def mark_result(url: str, status: str, error: str | None = None,
                            apply_duration_ms = ?, apply_task_id = ?
             WHERE url = ?
         """, (now, duration_ms, task_id, url))
+        _mark_duplicate_destination_rows(conn, url)
     else:
         attempts = 99 if permanent else "COALESCE(apply_attempts, 0) + 1"
         conn.execute(f"""
@@ -288,6 +575,8 @@ def gen_prompt(target_url: str, min_score: int = 7,
     job = acquire_job(target_url=target_url, min_score=min_score, worker_id=worker_id)
     if not job:
         return None
+    if job.get("_salary_ineligible"):
+        return None
 
     try:
         # Read resume text
@@ -330,9 +619,10 @@ def mark_job(url: str, status: str, reason: str | None = None) -> None:
     if status == "applied":
         conn.execute("""
             UPDATE jobs SET apply_status = 'applied', applied_at = ?,
-                           apply_error = NULL, agent_id = NULL
+                           apply_error = NULL, agent_id = NULL, duplicate_of = NULL
             WHERE url = ?
         """, (now, url))
+        _mark_duplicate_destination_rows(conn, url)
     else:
         conn.execute("""
             UPDATE jobs SET apply_status = 'failed', apply_error = ?,
@@ -354,6 +644,7 @@ def reset_failed() -> int:
                        apply_attempts = 0, agent_id = NULL
         WHERE apply_status = 'failed'
           OR (apply_status IS NOT NULL AND apply_status != 'applied'
+              AND apply_status != 'duplicate_applied'
               AND apply_status != 'in_progress')
     """)
     conn.commit()
@@ -644,6 +935,22 @@ def worker_loop(worker_id: int = 0, limit: int = 1,
             update_state(worker_id, status="manual_review",
                          job_title=job["title"], company=job.get("site", ""),
                          last_action="manual ATS requires review")
+            jobs_done += 1
+            update_state(worker_id, jobs_done=jobs_done)
+            if target_url:
+                break
+            continue
+
+        if job.get("_salary_ineligible"):
+            reason = job.get("_salary_reason", "posted pay is below the saved salary floor")
+            add_event(f"[W{worker_id}] Skipped below salary floor: {job['title'][:30]}")
+            update_state(
+                worker_id,
+                status="not_eligible",
+                job_title=job["title"],
+                company=job.get("site", ""),
+                last_action=reason[:80],
+            )
             jobs_done += 1
             update_state(worker_id, jobs_done=jobs_done)
             if target_url:

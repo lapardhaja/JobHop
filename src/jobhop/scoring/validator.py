@@ -114,9 +114,42 @@ def sanitize_text(text: str) -> str:
     return text.strip()
 
 
+def _normalized_bullet(text: str) -> str:
+    """Normalize harmless whitespace and punctuation for source-bullet matching."""
+    return re.sub(r"\s+", " ", sanitize_text(text)).strip().casefold()
+
+
+def _source_role_titles(original_text: str) -> list[str]:
+    """Extract role names from resume lines that contain a date range."""
+    month = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    date_range = re.compile(
+        rf"{month}\s*\d{{4}}\s*-\s*(?:Present|{month}\s*\d{{4}})",
+        re.IGNORECASE,
+    )
+    titles: list[str] = []
+    in_experience = False
+    for line in original_text.splitlines():
+        stripped = line.strip()
+        if stripped and stripped == stripped.upper() and len(stripped) > 3:
+            in_experience = "EXPERIENCE" in stripped and "PROJECT" not in stripped
+        if not in_experience or stripped.startswith(("•", "●", "▪", "- ")):
+            continue
+        match = date_range.search(line)
+        if not match:
+            continue
+        title = line[:match.start()].strip(" ,|\t")
+        title = re.sub(r"\s*,?\s*GS-\d+\s*$", "", title, flags=re.IGNORECASE)
+        title = re.sub(r"\s+", " ", title).strip()
+        if title and title.casefold() not in {item.casefold() for item in titles}:
+            titles.append(title)
+    return titles
+
+
 # ── JSON Field Validation ─────────────────────────────────────────────────
 
-def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dict:
+def validate_json_fields(
+    data: dict, profile: dict, mode: str = "normal", original_text: str = ""
+) -> dict:
     """Validate individual JSON fields from an LLM-generated tailored resume.
 
     Args:
@@ -158,6 +191,21 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     preserved_companies = resume_facts.get("preserved_companies", [])
 
     if isinstance(data["experience"], list):
+        current_title = str(profile.get("experience", {}).get("current_title", "")).strip()
+        if current_title and not any(
+            current_title.casefold() in str(entry.get("header", "")).casefold()
+            for entry in data["experience"]
+        ):
+            errors.append(f"Current role title must remain exactly '{current_title}'")
+        if original_text:
+            generated_headers = [
+                str(entry.get("header", ""))
+                for entry in data["experience"]
+                if isinstance(entry, dict)
+            ]
+            for source_title in _source_role_titles(original_text):
+                if not any(source_title.casefold() in header.casefold() for header in generated_headers):
+                    errors.append(f"Source role title must remain exactly '{source_title}'")
         for company in preserved_companies:
             has_company = any(
                 company.lower() in str(e.get("header", "")).lower()
@@ -174,6 +222,27 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
         for entry in data["projects"]:
             for b in entry.get("bullets", []):
                 all_text_parts.append(b)
+
+    # Every generated bullet must be copied from a bullet in the source resume.
+    if original_text:
+        original_bullets = {
+            _normalized_bullet(match.group(1))
+            for line in original_text.splitlines()
+            if (match := re.match(r"^\s*[•●▪\-]\s+(.+)$", line))
+        }
+        for section in ("experience", "projects"):
+            entries = data.get(section, [])
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                for bullet in entry.get("bullets", []):
+                    if _normalized_bullet(str(bullet)) not in original_bullets:
+                        errors.append(
+                            "Resume bullet was rewritten or added; copy original bullet wording exactly"
+                        )
+                        break
 
     # Education: preserved school must be present (always enforced)
     edu = str(data.get("education", ""))

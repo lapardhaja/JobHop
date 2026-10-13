@@ -53,6 +53,10 @@ The wizard asks for a resume, contact and application details, skills, preserved
 
 Enter salary values as digits (for example, `80000`). Use semicolons between list entries when an entry can contain a comma, such as a company or school name. For an open-ended salary minimum, enter a value like `80000+`; leave the range blank if you do not want to specify one.
 
+The saved annual salary expectation is also a hard application floor: postings whose known maximum is below it are excluded from the apply queue. Hourly rates are annualized at 2,080 hours. Listings with missing or unclear pay remain visible for review, and salary answers must never fall below the saved floor. Fit scores measure role match and do not include salary eligibility; check the salary label in the dashboard.
+
+By default, JobHop preserves the resume text without AI rewriting and copies the source PDF unchanged when one is available. This keeps job titles, section placement, education, certifications, and pagination intact. AI resume rewriting is opt-in with `allow_resume_rewriting: true` in the local profile; review any rewritten document before using it.
+
 Codex is the default provider for scoring, tailoring, cover letters, and the browser stage. The local Codex CLI login is used; no model API key is needed. API providers are available only when explicitly selected with `JOBHOP_AI_PROVIDER=api` in the local `.env` file.
 
 ## Keep your data local
@@ -97,6 +101,10 @@ location:
 Replace the sample city and district names with the places you want. The wizard's distance field is a numeric search radius; it does not define a city boundary or automatically enumerate districts. For citywide coverage, include the city's common names and districts in the location patterns. Keep the separate `remote: true` entry if you also want remote roles.
 
 The configuration also controls role queries, boards, age of postings, and excluded job titles. `src/jobhop/config/searches.example.yaml` has a fuller example.
+
+Set `defaults.hours_old` to `720` to search the most recent 30 days. Increase `defaults.results_per_site` if you want a wider result set, and add exact title variants when a posting inserts words such as “AI” into a role name. JobHop stores application status in the local database and skips listings whose normalized application destination matches one already applied to. Those rows appear as “Duplicate postings skipped” in status and the dashboard. For applications you complete outside JobHop, record the listing with `jobhop apply --mark-applied "<listing URL>"`.
+
+Before a live application, JobHop also checks the saved NYC-area/remote preference. Posts with an unlisted location stay in location review, known out-of-area posts are excluded, and internship/co-op/apprenticeship titles are excluded from this professional-role search. The dry-run preview only exposes browser inspection tools; it cannot click Apply or submit.
 
 To keep a particular listing out of every application run, add its URL on a separate line in `%USERPROFILE%\.jobhop\excluded_urls.txt` (Windows) or `~/.jobhop/excluded_urls.txt` (macOS/Linux). JobHop ignores the URL's query string and checks both the listing and application URLs, including when a listing is selected directly.
 

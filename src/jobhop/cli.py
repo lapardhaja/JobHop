@@ -206,7 +206,8 @@ def apply(
     if not (gen and url):
         conn = get_connection()
         ready = conn.execute(
-            "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL AND applied_at IS NULL"
+            "SELECT COUNT(*) FROM jobs WHERE tailored_resume_path IS NOT NULL "
+            "AND applied_at IS NULL AND (apply_status IS NULL OR apply_status = 'failed')"
         ).fetchone()[0]
         if ready == 0:
             console.print(
@@ -295,8 +296,14 @@ def status() -> None:
     summary.add_row("Tailored resumes", str(stats["tailored"]))
     summary.add_row("Pending tailoring (7+)", str(stats["untailored_eligible"]))
     summary.add_row("Cover letters", str(stats["with_cover_letter"]))
-    summary.add_row("Ready to apply", str(stats["ready_to_apply"]))
+    summary.add_row("Ready to apply (unknown pay included)", str(stats["ready_to_apply"]))
+    summary.add_row("Excluded: below salary floor", str(stats["salary_excluded"]))
+    summary.add_row("Ready with pay unclear", str(stats["salary_unknown"]))
+    summary.add_row("Needs location review", str(stats["location_review"]))
+    summary.add_row("Excluded: outside saved locations", str(stats["location_excluded"]))
+    summary.add_row("Excluded: internship/co-op role", str(stats["role_excluded"]))
     summary.add_row("Applied", str(stats["applied"]))
+    summary.add_row("Duplicate postings skipped", str(stats["duplicates_skipped"]))
     summary.add_row("Apply errors", str(stats["apply_errors"]))
 
     console.print(summary)
