@@ -142,6 +142,8 @@ ISSUES: (list any problems, or "none")
 ## ALLOWED CHANGES:
 - Reorder existing skills within their source categories
 - Reorder existing projects and bullets within their original section
+- Preserve every source section in its original place, including research experience, additional experience, education, and certifications.
+- Keep all degrees, minors, GPAs, and certifications; do not drop or merge them.
 
 The candidate headline, summary, experience titles, employers, dates, and bullet wording must remain faithful to the source. Rewritten or newly invented bullets, changed role titles, or a headline that claims the target job title are FAIL conditions.
 
@@ -155,6 +157,7 @@ The candidate headline, summary, experience titles, employers, dates, and bullet
 ## PASS CONDITIONS:
 - The headline, summary, role titles, employers, dates, and metrics match the source.
 - Every experience and project bullet is copied verbatim from the source.
+- Every source section and all education and certification details remain present in their original sections.
 - Changes are limited to permitted reordering and removal of unrelated bullets or projects."""
 
 
