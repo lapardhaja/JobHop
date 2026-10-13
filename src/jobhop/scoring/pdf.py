@@ -153,6 +153,42 @@ def parse_entries(text: str) -> list[dict]:
     return entries
 
 
+def group_experience_roles(entries: list[dict]) -> list[dict]:
+    """Keep consecutive dated positions under the employer line above them."""
+    month_date = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{4}"
+    year = r"(?:19|20)\d{2}"
+    date_range = re.compile(
+        rf"(?:{month_date}|{year})\s*(?:-|–|—|to)\s*(?:{month_date}|{year}|present|current|now)\b",
+        re.IGNORECASE,
+    )
+
+    grouped: list[dict] = []
+    for entry in entries:
+        previous = grouped[-1] if grouped else None
+        is_continuing_role = (
+            previous is not None
+            and not entry["subtitle"]
+            and bool(date_range.search(entry["title"]))
+            and bool(previous["positions"])
+            and bool(previous["positions"][0]["title"])
+        )
+        if is_continuing_role:
+            previous["positions"].append({
+                "title": entry["title"],
+                "bullets": entry["bullets"],
+            })
+            continue
+
+        grouped.append({
+            "title": entry["title"],
+            "positions": [{
+                "title": entry["subtitle"],
+                "bullets": entry["bullets"],
+            }],
+        })
+    return grouped
+
+
 def _format_entry_label(value: str) -> str:
     """Add display-only separators where PDF text extraction joined adjacent columns."""
     month = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
@@ -188,18 +224,37 @@ def build_html(resume: dict) -> str:
             if not body:
                 body = f'<div class="plain">{inline_text(content).replace(chr(10), "<br>")}</div>'
         elif "EXPERIENCE" in normalized or normalized == "PROJECTS":
+            is_experience = "EXPERIENCE" in normalized
             entries = parse_entries(content)
+            if is_experience:
+                entries = group_experience_roles(entries)
             body_parts: list[str] = []
             for entry in entries:
-                subtitle = (
-                    f'<div class="entry-subtitle">{inline_text(_format_entry_label(entry["subtitle"]))}</div>'
-                    if entry["subtitle"] else ""
-                )
-                bullets = "".join(f"<li>{inline_text(bullet)}</li>" for bullet in entry["bullets"])
-                body_parts.append(
-                    f'<div class="entry"><div class="entry-title">{inline_text(_format_entry_label(entry["title"]))}</div>'
-                    f'{subtitle}<ul>{bullets}</ul></div>'
-                )
+                if is_experience:
+                    positions = []
+                    for position in entry["positions"]:
+                        subtitle = (
+                            f'<div class="entry-subtitle">{inline_text(_format_entry_label(position["title"]))}</div>'
+                            if position["title"] else ""
+                        )
+                        bullets = "".join(
+                            f"<li>{inline_text(bullet)}</li>" for bullet in position["bullets"]
+                        )
+                        positions.append(f'<div class="position">{subtitle}<ul>{bullets}</ul></div>')
+                    body_parts.append(
+                        f'<div class="entry"><div class="entry-title">{inline_text(_format_entry_label(entry["title"]))}</div>'
+                        f'{"".join(positions)}</div>'
+                    )
+                else:
+                    subtitle = (
+                        f'<div class="entry-subtitle">{inline_text(_format_entry_label(entry["subtitle"]))}</div>'
+                        if entry["subtitle"] else ""
+                    )
+                    bullets = "".join(f"<li>{inline_text(bullet)}</li>" for bullet in entry["bullets"])
+                    body_parts.append(
+                        f'<div class="entry"><div class="entry-title">{inline_text(_format_entry_label(entry["title"]))}</div>'
+                        f'{subtitle}<ul>{bullets}</ul></div>'
+                    )
             body = "".join(body_parts) or f'<div class="plain">{inline_text(content).replace(chr(10), "<br>")}</div>'
         else:
             safe_lines = [
@@ -234,6 +289,7 @@ body {{ font-family: Calibri, 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; 
 .skill-row {{ font-size: 10pt; line-height: 1.23; }}
 .skill-cat {{ font-weight: 600; color: #1a3a5c; }}
 .entry {{ margin-bottom: 6px; break-inside: avoid-page; page-break-inside: avoid; }}
+.position + .position {{ margin-top: 4px; }}
 .entry-title {{ font-weight: 600; color: #1a3a5c; break-after: avoid; page-break-after: avoid; }}
 .entry-subtitle {{ font-size: 9.5pt; color: #4a7a9b; font-style: italic; }}
 ul {{ margin: 2px 0 2px 16px; padding: 0; }}
