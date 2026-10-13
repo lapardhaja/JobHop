@@ -6,10 +6,10 @@ import shutil
 from pathlib import Path
 
 # User data directory — all user-specific files live here
-APP_DIR = Path(os.environ.get("APPLYPILOT_DIR", Path.home() / ".applypilot"))
+APP_DIR = Path(os.environ.get("JOBHOP_DIR", Path.home() / ".jobhop"))
 
 # Core paths
-DB_PATH = APP_DIR / "applypilot.db"
+DB_PATH = APP_DIR / "jobhop.db"
 PROFILE_PATH = APP_DIR / "profile.json"
 RESUME_PATH = APP_DIR / "resume.txt"
 RESUME_PDF_PATH = APP_DIR / "resume.pdf"
@@ -92,7 +92,7 @@ def ensure_dirs():
 
 
 def load_profile() -> dict:
-    """Load user profile from ~/.applypilot/profile.json."""
+    """Load user profile from ~/.jobhop/profile.json."""
     import json
     if not PROFILE_PATH.exists():
         raise FileNotFoundError(
@@ -102,7 +102,7 @@ def load_profile() -> dict:
 
 
 def load_search_config() -> dict:
-    """Load search configuration from ~/.applypilot/searches.yaml."""
+    """Load search configuration from ~/.jobhop/searches.yaml."""
     import yaml
     if not SEARCH_CONFIG_PATH.exists():
         # Fall back to package-shipped example
@@ -172,7 +172,7 @@ DEFAULTS = {
 
 
 def load_env():
-    """Load environment variables from ~/.applypilot/.env if it exists."""
+    """Load environment variables from ~/.jobhop/.env if it exists."""
     from dotenv import load_dotenv
     if ENV_PATH.exists():
         load_dotenv(ENV_PATH)
@@ -229,15 +229,15 @@ def get_tier() -> int:
 
 def get_ai_provider() -> str:
     """Return the explicitly selected text backend, defaulting to Codex."""
-    provider = os.environ.get("APPLYPILOT_AI_PROVIDER", "codex").strip().lower()
+    provider = os.environ.get("JOBHOP_AI_PROVIDER", "codex").strip().lower()
     if provider not in {"codex", "api"}:
-        raise ValueError("APPLYPILOT_AI_PROVIDER must be 'codex' or 'api'.")
+        raise ValueError("JOBHOP_AI_PROVIDER must be 'codex' or 'api'.")
     return provider
 
 
 def _api_backend_configured() -> bool:
     """Whether the explicit API backend has at least one configured provider."""
-    provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
+    provider = os.environ.get("JOBHOP_API_PROVIDER", "").strip().lower()
     if provider == "gemini":
         return bool(os.environ.get("GEMINI_API_KEY"))
     if provider == "openai":
@@ -251,7 +251,7 @@ def _api_backend_configured() -> bool:
 
 def _codex_status() -> tuple[str | None, bool, str]:
     """Return Codex executable, login state, and a credential-free message."""
-    from applypilot.codex import codex_login_status, find_codex_cli
+    from jobhop.codex import codex_login_status, find_codex_cli
 
     executable = find_codex_cli()
     if not executable:

@@ -1,6 +1,6 @@
 """JobHop first-time setup wizard.
 
-Interactive flow that creates ~/.applypilot/ with:
+Interactive flow that creates ~/.jobhop/ with:
   - resume.txt (and optionally resume.pdf)
   - profile.json
   - searches.yaml
@@ -19,7 +19,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 
-from applypilot.config import (
+from jobhop.config import (
     APP_DIR,
     ENV_PATH,
     PROFILE_PATH,
@@ -305,7 +305,7 @@ def _setup_ai_features() -> None:
 
     env_values = _stored_env_values()
     backend = Prompt.ask("Text backend", choices=["codex", "api"], default="codex").strip().lower()
-    updates: dict[str, str | None] = {"APPLYPILOT_AI_PROVIDER": backend}
+    updates: dict[str, str | None] = {"JOBHOP_AI_PROVIDER": backend}
 
     if backend == "codex":
         model = Prompt.ask(
@@ -315,14 +315,14 @@ def _setup_ai_features() -> None:
         updates["CODEX_MODEL"] = model or None
     else:
         console.print(
-            "API providers are used only while APPLYPILOT_AI_PROVIDER=api. "
+            "API providers are used only while JOBHOP_AI_PROVIDER=api. "
             "Codex remains the default backend."
         )
         choices = ["gemini", "openai", "local"]
-        saved_provider = env_values.get("APPLYPILOT_API_PROVIDER", "")
+        saved_provider = env_values.get("JOBHOP_API_PROVIDER", "")
         default_provider = saved_provider if saved_provider in choices else "gemini"
         api_provider = Prompt.ask("API provider", choices=choices, default=default_provider).strip().lower()
-        updates["APPLYPILOT_API_PROVIDER"] = api_provider
+        updates["JOBHOP_API_PROVIDER"] = api_provider
 
         if api_provider in {"gemini", "openai"}:
             key_name = "GEMINI_API_KEY" if api_provider == "gemini" else "OPENAI_API_KEY"
@@ -366,7 +366,7 @@ def _setup_auto_apply() -> None:
         return
 
     # Check Codex CLI and the browser runtime.
-    from applypilot.codex import codex_login_status, find_codex_cli
+    from jobhop.codex import codex_login_status, find_codex_cli
 
     codex_bin = find_codex_cli()
     if codex_bin:
@@ -382,7 +382,7 @@ def _setup_auto_apply() -> None:
             "Auto-apply won't work until Codex CLI is installed and signed in."
         )
     try:
-        from applypilot.config import get_chrome_path
+        from jobhop.config import get_chrome_path
         get_chrome_path()
         console.print("[green]Chrome/Chromium detected.[/green]")
     except FileNotFoundError:
@@ -452,7 +452,7 @@ def run_wizard() -> None:
     console.print()
 
     # Done — show tier status
-    from applypilot.config import get_tier, TIER_LABELS, TIER_COMMANDS
+    from jobhop.config import get_tier, TIER_LABELS, TIER_COMMANDS
 
     tier = get_tier()
 

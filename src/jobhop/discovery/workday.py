@@ -19,9 +19,9 @@ from html.parser import HTMLParser
 
 import yaml
 
-from applypilot import config
-from applypilot.config import CONFIG_DIR
-from applypilot.database import get_connection, init_db
+from jobhop import config
+from jobhop.config import CONFIG_DIR
+from jobhop.database import get_connection, init_db
 
 log = logging.getLogger(__name__)
 

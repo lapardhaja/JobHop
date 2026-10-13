@@ -10,7 +10,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
-from applypilot import __version__
+from jobhop import __version__
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,8 +36,8 @@ VALID_STAGES = ("discover", "enrich", "score", "tailor", "cover", "pdf")
 
 def _bootstrap() -> None:
     """Common setup: load env, create dirs, init DB."""
-    from applypilot.config import load_env, ensure_dirs
-    from applypilot.database import init_db
+    from jobhop.config import load_env, ensure_dirs
+    from jobhop.database import init_db
 
     load_env()
     ensure_dirs()
@@ -69,7 +69,7 @@ def main(
 @app.command()
 def init() -> None:
     """Run the first-time setup wizard (profile, resume, search config)."""
-    from applypilot.wizard.init import run_wizard
+    from jobhop.wizard.init import run_wizard
 
     run_wizard()
 
@@ -102,7 +102,7 @@ def run(
     """Run pipeline stages: discover, enrich, score, tailor, cover, pdf."""
     _bootstrap()
 
-    from applypilot.pipeline import run_pipeline
+    from jobhop.pipeline import run_pipeline
 
     stage_list = stages if stages else ["all"]
 
@@ -118,7 +118,7 @@ def run(
     # Gate AI stages behind Tier 2
     llm_stages = {"score", "tailor", "cover"}
     if any(s in stage_list for s in llm_stages) or "all" in stage_list:
-        from applypilot.config import check_tier
+        from jobhop.config import check_tier
         check_tier(2, "AI scoring/tailoring")
 
     # Validate the --validation flag value
@@ -165,25 +165,25 @@ def apply(
     """Launch auto-apply to submit job applications."""
     _bootstrap()
 
-    from applypilot.config import check_tier, PROFILE_PATH as _profile_path
-    from applypilot.database import get_connection
+    from jobhop.config import check_tier, PROFILE_PATH as _profile_path
+    from jobhop.database import get_connection
 
     # --- Utility modes (no browser or Codex session needed) ---
 
     if mark_applied:
-        from applypilot.apply.launcher import mark_job
+        from jobhop.apply.launcher import mark_job
         mark_job(mark_applied, "applied")
         console.print(f"[green]Marked as applied:[/green] {mark_applied}")
         return
 
     if mark_failed:
-        from applypilot.apply.launcher import mark_job
+        from jobhop.apply.launcher import mark_job
         mark_job(mark_failed, "failed", reason=fail_reason)
         console.print(f"[yellow]Marked as failed:[/yellow] {mark_failed} ({fail_reason or 'manual'})")
         return
 
     if reset_failed:
-        from applypilot.apply.launcher import reset_failed as do_reset
+        from jobhop.apply.launcher import reset_failed as do_reset
         count = do_reset()
         console.print(f"[green]Reset {count} failed job(s) for retry.[/green]")
         return
@@ -216,7 +216,7 @@ def apply(
             raise typer.Exit(code=1)
 
     if gen:
-        from applypilot.apply.launcher import gen_prompt
+        from jobhop.apply.launcher import gen_prompt
         target = url or ""
         if not target:
             console.print("[red]--gen requires --url to specify which job.[/red]")
@@ -226,7 +226,7 @@ def apply(
             console.print("[red]No matching job found for that URL.[/red]")
             raise typer.Exit(code=1)
         console.print(f"[green]Wrote prompt to:[/green] {prompt_file}")
-        from applypilot.apply.launcher import _codex_mcp_overrides, BASE_CDP_PORT
+        from jobhop.apply.launcher import _codex_mcp_overrides, BASE_CDP_PORT
         codex_args = [
             "codex", "exec", "--json", "--ephemeral", "--ignore-user-config",
             "--sandbox", "read-only", "--skip-git-repo-check",
@@ -244,7 +244,7 @@ def apply(
         console.print(f"  Get-Content -Raw '{prompt_path}' | & 'codex' {rendered_args}")
         return
 
-    from applypilot.apply.launcher import main as apply_main
+    from jobhop.apply.launcher import main as apply_main
 
     effective_limit = limit if limit is not None else (0 if continuous else 1)
 
@@ -275,7 +275,7 @@ def status() -> None:
     """Show pipeline statistics from the database."""
     _bootstrap()
 
-    from applypilot.database import get_stats
+    from jobhop.database import get_stats
 
     stats = get_stats()
 
@@ -341,7 +341,7 @@ def dashboard() -> None:
     """Generate and open the HTML dashboard in your browser."""
     _bootstrap()
 
-    from applypilot.view import open_dashboard
+    from jobhop.view import open_dashboard
 
     open_dashboard()
 
@@ -350,7 +350,7 @@ def dashboard() -> None:
 def doctor() -> None:
     """Check your setup and diagnose missing requirements."""
     import shutil
-    from applypilot.config import (
+    from jobhop.config import (
         load_env, PROFILE_PATH, RESUME_PATH, RESUME_PDF_PATH,
         SEARCH_CONFIG_PATH, ENV_PATH, get_chrome_path,
     )
@@ -394,12 +394,12 @@ def doctor() -> None:
 
     # --- Selected text backend ---
     import os
-    from applypilot import config as app_config
+    from jobhop import config as app_config
 
     has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
     has_local = bool(os.environ.get("LLM_URL"))
-    api_provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
+    api_provider = os.environ.get("JOBHOP_API_PROVIDER", "").strip().lower()
     try:
         provider = app_config.get_ai_provider()
     except ValueError as exc:
@@ -433,9 +433,9 @@ def doctor() -> None:
             results.append(("API backend", ok_mark, f"Local API-compatible provider ({model}) configured"))
         else:
             results.append(("API backend", fail_mark,
-                            "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in ~/.applypilot/.env"))
+                            "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in ~/.jobhop/.env"))
     else:
-        results.append(("AI backend", fail_mark, "Correct APPLYPILOT_AI_PROVIDER in ~/.applypilot/.env"))
+        results.append(("AI backend", fail_mark, "Correct JOBHOP_AI_PROVIDER in ~/.jobhop/.env"))
 
     # --- Tier 3 checks ---
     codex_bin, codex_signed_in, codex_message = app_config._codex_status()
@@ -451,7 +451,7 @@ def doctor() -> None:
                         "Codex CLI sign-in is required for browser auto-apply"))
     elif provider == "codex":
         results.append(("API mode", "[dim]optional[/dim]",
-                        "Set APPLYPILOT_AI_PROVIDER=api and configure an API provider to use APIs"))
+                        "Set JOBHOP_AI_PROVIDER=api and configure an API provider to use APIs"))
 
     # Chrome
     try:
@@ -489,7 +489,7 @@ def doctor() -> None:
     console.print()
 
     # Tier summary
-    from applypilot.config import get_tier, TIER_LABELS
+    from jobhop.config import get_tier, TIER_LABELS
     tier = get_tier()
     console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
 

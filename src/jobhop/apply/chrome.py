@@ -15,7 +15,7 @@ import time
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from applypilot import config
+from jobhop import config
 
 logger = logging.getLogger(__name__)
 

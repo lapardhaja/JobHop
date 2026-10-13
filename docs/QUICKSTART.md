@@ -53,16 +53,16 @@ The wizard asks for a resume, contact and application details, skills, preserved
 
 Enter salary values as digits (for example, `80000`). Use semicolons between list entries when an entry can contain a comma, such as a company or school name. For an open-ended salary minimum, enter a value like `80000+`; leave the range blank if you do not want to specify one.
 
-Codex is the default provider for scoring, tailoring, cover letters, and the browser stage. The local Codex CLI login is used; no model API key is needed. API providers are available only when explicitly selected with `APPLYPILOT_AI_PROVIDER=api` in the local `.env` file.
+Codex is the default provider for scoring, tailoring, cover letters, and the browser stage. The local Codex CLI login is used; no model API key is needed. API providers are available only when explicitly selected with `JOBHOP_AI_PROVIDER=api` in the local `.env` file.
 
 ## Keep your data local
 
-By default, JobHop uses `%USERPROFILE%\.applypilot` on Windows and `~/.applypilot` on macOS/Linux. This deliberately shares the existing ApplyPilot profile, resume, job database, searches, and generated documents when they already use that directory.
+By default, JobHop stores your profile, resume, job database, searches, and generated documents in `%USERPROFILE%\.jobhop` on Windows or `~/.jobhop` on macOS/Linux.
 
-Set `APPLYPILOT_DIR` before running `jobhop init` if you want a separate data directory. For the current PowerShell session:
+Set `JOBHOP_DIR` before running `jobhop init` if you want a separate data directory. For the current PowerShell session:
 
 ```powershell
-$env:APPLYPILOT_DIR = Join-Path $env:USERPROFILE ".jobhop"
+$env:JOBHOP_DIR = Join-Path $env:USERPROFILE "JobHopData"
 jobhop init
 ```
 
@@ -96,7 +96,7 @@ location:
 
 Replace the sample city and district names with the places you want. The wizard's distance field is a numeric search radius; it does not define a city boundary or automatically enumerate districts. For citywide coverage, include the city's common names and districts in the location patterns. Keep the separate `remote: true` entry if you also want remote roles.
 
-The configuration also controls role queries, boards, age of postings, and excluded job titles. `src/applypilot/config/searches.example.yaml` has a fuller example.
+The configuration also controls role queries, boards, age of postings, and excluded job titles. `src/jobhop/config/searches.example.yaml` has a fuller example.
 
 ## First run
 

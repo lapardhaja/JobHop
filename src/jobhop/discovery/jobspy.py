@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 
 from jobspy import scrape_jobs
 
-from applypilot import config
-from applypilot.database import get_connection, init_db, store_jobs
+from jobhop import config
+from jobhop.database import get_connection, init_db, store_jobs
 
 log = logging.getLogger(__name__)
 

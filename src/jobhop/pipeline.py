@@ -21,8 +21,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from applypilot.config import load_env, ensure_dirs
-from applypilot.database import init_db, get_connection, get_stats
+from jobhop.config import load_env, ensure_dirs
+from jobhop.database import init_db, get_connection, get_stats
 
 log = logging.getLogger(__name__)
 console = Console()
@@ -66,7 +66,7 @@ def _run_discover(workers: int = 1) -> dict:
     # JobSpy
     console.print("  [cyan]JobSpy full crawl...[/cyan]")
     try:
-        from applypilot.discovery.jobspy import run_discovery
+        from jobhop.discovery.jobspy import run_discovery
         run_discovery()
         stats["jobspy"] = "ok"
     except Exception as e:
@@ -77,7 +77,7 @@ def _run_discover(workers: int = 1) -> dict:
     # Workday corporate scraper
     console.print("  [cyan]Workday corporate scraper...[/cyan]")
     try:
-        from applypilot.discovery.workday import run_workday_discovery
+        from jobhop.discovery.workday import run_workday_discovery
         run_workday_discovery(workers=workers)
         stats["workday"] = "ok"
     except Exception as e:
@@ -88,7 +88,7 @@ def _run_discover(workers: int = 1) -> dict:
     # Smart extract
     console.print("  [cyan]Smart extract (AI-powered scraping)...[/cyan]")
     try:
-        from applypilot.discovery.smartextract import run_smart_extract
+        from jobhop.discovery.smartextract import run_smart_extract
         run_smart_extract(workers=workers)
         stats["smartextract"] = "ok"
     except Exception as e:
@@ -102,7 +102,7 @@ def _run_discover(workers: int = 1) -> dict:
 def _run_enrich(workers: int = 1) -> dict:
     """Stage: Detail enrichment — scrape full descriptions and apply URLs."""
     try:
-        from applypilot.enrichment.detail import run_enrichment
+        from jobhop.enrichment.detail import run_enrichment
         run_enrichment(workers=workers)
         return {"status": "ok"}
     except Exception as e:
@@ -113,7 +113,7 @@ def _run_enrich(workers: int = 1) -> dict:
 def _run_score() -> dict:
     """Stage: LLM scoring — assign fit scores 1-10."""
     try:
-        from applypilot.scoring.scorer import run_scoring
+        from jobhop.scoring.scorer import run_scoring
         run_scoring()
         return {"status": "ok"}
     except Exception as e:
@@ -124,7 +124,7 @@ def _run_score() -> dict:
 def _run_tailor(min_score: int = 7, validation_mode: str = "normal") -> dict:
     """Stage: Resume tailoring — generate tailored resumes for high-fit jobs."""
     try:
-        from applypilot.scoring.tailor import run_tailoring
+        from jobhop.scoring.tailor import run_tailoring
         run_tailoring(min_score=min_score, validation_mode=validation_mode)
         return {"status": "ok"}
     except Exception as e:
@@ -135,7 +135,7 @@ def _run_tailor(min_score: int = 7, validation_mode: str = "normal") -> dict:
 def _run_cover(min_score: int = 7, validation_mode: str = "normal") -> dict:
     """Stage: Cover letter generation."""
     try:
-        from applypilot.scoring.cover_letter import run_cover_letters
+        from jobhop.scoring.cover_letter import run_cover_letters
         run_cover_letters(min_score=min_score, validation_mode=validation_mode)
         return {"status": "ok"}
     except Exception as e:
@@ -146,7 +146,7 @@ def _run_cover(min_score: int = 7, validation_mode: str = "normal") -> dict:
 def _run_pdf() -> dict:
     """Stage: PDF conversion — convert tailored resumes and cover letters to PDF."""
     try:
-        from applypilot.scoring.pdf import batch_convert
+        from jobhop.scoring.pdf import batch_convert
         batch_convert()
         return {"status": "ok"}
     except Exception as e:

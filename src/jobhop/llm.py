@@ -1,6 +1,6 @@
 """Unified text-generation client for JobHop.
 
-Codex CLI is the default provider. Set ``APPLYPILOT_AI_PROVIDER=api`` to
+Codex CLI is the default provider. Set ``JOBHOP_AI_PROVIDER=api`` to
 explicitly use the existing Gemini, OpenAI, or OpenAI-compatible API client.
 """
 
@@ -10,7 +10,7 @@ import time
 
 import httpx
 
-from applypilot.codex import run_codex_exec
+from jobhop.codex import run_codex_exec
 
 log = logging.getLogger(__name__)
 
@@ -28,16 +28,16 @@ def _detect_provider() -> tuple[str, str, str]:
     openai_key = os.environ.get("OPENAI_API_KEY", "")
     local_url = os.environ.get("LLM_URL", "")
     model_override = os.environ.get("LLM_MODEL", "")
-    api_provider = os.environ.get("APPLYPILOT_API_PROVIDER", "").strip().lower()
+    api_provider = os.environ.get("JOBHOP_API_PROVIDER", "").strip().lower()
 
     if api_provider and api_provider not in {"gemini", "openai", "local"}:
         raise RuntimeError(
-            "Invalid APPLYPILOT_API_PROVIDER value. Choose 'gemini', 'openai', or 'local'."
+            "Invalid JOBHOP_API_PROVIDER value. Choose 'gemini', 'openai', or 'local'."
         )
 
     if api_provider == "gemini":
         if not gemini_key:
-            raise RuntimeError("APPLYPILOT_API_PROVIDER=gemini requires GEMINI_API_KEY.")
+            raise RuntimeError("JOBHOP_API_PROVIDER=gemini requires GEMINI_API_KEY.")
         return (
             "https://generativelanguage.googleapis.com/v1beta/openai",
             model_override or "gemini-2.0-flash",
@@ -45,11 +45,11 @@ def _detect_provider() -> tuple[str, str, str]:
         )
     if api_provider == "openai":
         if not openai_key:
-            raise RuntimeError("APPLYPILOT_API_PROVIDER=openai requires OPENAI_API_KEY.")
+            raise RuntimeError("JOBHOP_API_PROVIDER=openai requires OPENAI_API_KEY.")
         return "https://api.openai.com/v1", model_override or "gpt-4o-mini", openai_key
     if api_provider == "local":
         if not local_url:
-            raise RuntimeError("APPLYPILOT_API_PROVIDER=local requires LLM_URL.")
+            raise RuntimeError("JOBHOP_API_PROVIDER=local requires LLM_URL.")
         return (
             local_url.rstrip("/"),
             model_override or "local-model",
@@ -367,7 +367,7 @@ def get_client() -> LLMClient | CodexClient:
     """Return (or create) the module-level provider client singleton."""
     global _instance
     if _instance is None:
-        provider = os.environ.get("APPLYPILOT_AI_PROVIDER", "codex").strip().lower()
+        provider = os.environ.get("JOBHOP_AI_PROVIDER", "codex").strip().lower()
         if provider == "codex":
             model = os.environ.get("CODEX_MODEL") or None
             log.info("LLM provider: Codex CLI  model: %s", model or "Codex default")
@@ -378,6 +378,6 @@ def get_client() -> LLMClient | CodexClient:
             _instance = LLMClient(base_url, model, api_key)
         else:
             raise RuntimeError(
-                "Invalid APPLYPILOT_AI_PROVIDER value. Choose 'codex' (default) or 'api'."
+                "Invalid JOBHOP_AI_PROVIDER value. Choose 'codex' (default) or 'api'."
             )
     return _instance
