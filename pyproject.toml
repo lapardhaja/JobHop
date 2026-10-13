@@ -37,6 +37,8 @@ jobhop = "applypilot.cli:app"
 applypilot = "applypilot.cli:app"
 
 [project.urls]
+Homepage = "https://github.com/lapardhaja/JobHop"
+Repository = "https://github.com/lapardhaja/JobHop"
 Upstream = "https://github.com/Pickle-Pixel/ApplyPilot"
 
 [build-system]

@@ -18,7 +18,7 @@ Description enrichment uses Playwright's Chromium build. Having Google Chrome in
 Open PowerShell in the folder where you want the source checkout:
 
 ```powershell
-git clone https://github.com/<owner>/JobHop.git
+git clone https://github.com/lapardhaja/JobHop.git
 Set-Location JobHop
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
