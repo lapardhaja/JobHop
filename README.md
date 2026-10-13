@@ -21,6 +21,8 @@ JobHop is a 6-stage job application pipeline. It discovers jobs across 5+ boards
 
 Install this source checkout in its own virtual environment, then run the pipeline:
 
+See the [Windows Quick Start](docs/QUICKSTART.md) for complete installation, Codex sign-in, profile setup, citywide location filtering, and a safe first-run walkthrough. Common setup issues are covered in [Troubleshooting](docs/TROUBLESHOOTING.md).
+
 ```bash
 python -m venv .venv
 # Windows PowerShell: .\.venv\Scripts\Activate.ps1

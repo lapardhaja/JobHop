@@ -85,6 +85,26 @@ def _build_skills_set(profile: dict) -> set[str]:
     return allowed
 
 
+def _preserved_schools(profile: dict) -> list[str]:
+    """Return each school that must remain in the tailored resume.
+
+    A semicolon separates schools so names such as "University of California,
+    Berkeley" can retain their internal comma.
+    """
+    value = profile.get("resume_facts", {}).get("preserved_school", "")
+    if isinstance(value, (list, tuple, set)):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(";") if item.strip()]
+    return []
+
+
+def _contains_watchlist_term(text: str, term: str) -> bool:
+    """Match a watchlist item as a whole token, including C++ and C#."""
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])"
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
 def sanitize_text(text: str) -> str:
     """Auto-fix common LLM output issues instead of rejecting."""
     text = text.replace(" \u2014 ", ", ").replace("\u2014", ", ")   # em dash -> comma
@@ -126,10 +146,11 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
     # Skills: check for fabrication (always enforced)
     if isinstance(data["skills"], dict):
         skills_text = " ".join(str(v) for v in data["skills"].values()).lower()
+        allowed_skills = _build_skills_set(profile)
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in skills_text:
+            if _contains_watchlist_term(skills_text, fake) and fake not in allowed_skills:
                 errors.append(f"Fabricated skill: '{fake}'")
 
     # Experience: preserved companies must be present (always enforced)
@@ -155,11 +176,10 @@ def validate_json_fields(data: dict, profile: dict, mode: str = "normal") -> dic
                 all_text_parts.append(b)
 
     # Education: preserved school must be present (always enforced)
-    preserved_school = resume_facts.get("preserved_school", "")
-    if preserved_school:
-        edu = str(data.get("education", ""))
-        if preserved_school.lower() not in edu.lower():
-            errors.append(f"Education '{preserved_school}' missing")
+    edu = str(data.get("education", ""))
+    for school in _preserved_schools(profile):
+        if school.lower() not in edu.lower():
+            errors.append(f"Education '{school}' missing")
 
     # Bulk text checks
     all_text = " ".join(all_text_parts).lower()
@@ -230,9 +250,9 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
             warnings.append(f"Project '{project}' not found -- may have been renamed")
 
     # 5. Check school preserved
-    preserved_school = resume_facts.get("preserved_school", "")
-    if preserved_school and preserved_school.lower() not in text_lower:
-        errors.append(f"Education '{preserved_school}' missing")
+    for school in _preserved_schools(profile):
+        if school.lower() not in text_lower:
+            errors.append(f"Education '{school}' missing")
 
     # 6. Check contact info preserved (warn, don't error -- we can inject)
     email = personal.get("email", "")
@@ -247,10 +267,11 @@ def validate_tailored_resume(text: str, profile: dict, original_text: str = "") 
     skills_end = text_lower.find("experience", skills_start) if skills_start != -1 else -1
     if skills_start != -1 and skills_end != -1:
         skills_block = text_lower[skills_start:skills_end]
+        allowed_skills = _build_skills_set(profile)
         for fake in FABRICATION_WATCHLIST:
             if len(fake) <= 2:
                 continue
-            if fake in skills_block:
+            if _contains_watchlist_term(skills_block, fake) and fake not in allowed_skills:
                 errors.append(f"FABRICATED SKILL in Technical Skills: '{fake}'")
 
     # 8. Scan full document for fabrication watchlist items not in original

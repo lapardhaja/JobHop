@@ -209,8 +209,12 @@ def _build_salary_section(profile: dict) -> str:
     comp = profile["compensation"]
     currency = comp.get("salary_currency", "USD")
     floor = comp["salary_expectation"]
-    range_min = comp.get("salary_range_min", floor)
-    range_max = comp.get("salary_range_max", str(int(floor) + 20000) if floor.isdigit() else floor)
+    range_min = comp.get("salary_range_min") or floor
+    range_max = comp.get("salary_range_max") or ""
+    if range_max:
+        range_guidance = f'"${range_min}-${range_max} {currency}"'
+    else:
+        range_guidance = f'"${range_min}+ {currency}"'
     conversion_note = comp.get("currency_conversion_note", "")
 
     # Compute example hourly rates at 3 salary levels
@@ -239,7 +243,7 @@ Decision tree:
 2. Title says Senior, Staff, Lead, Principal, Architect, or level II/III/IV? -> Minimum $110K {currency}. Use midpoint of posted range if higher.
 3. {convert_line}
 4. No salary info anywhere? -> Use ${floor} {currency}.
-5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> "${range_min}-${range_max} {currency}".
+5. Asked for a range? -> Give posted midpoint minus 10% to midpoint plus 10%. No posted range? -> {range_guidance}.
 6. Hourly rate? -> Divide your annual answer by 2080. ({hourly_line})"""
 
 

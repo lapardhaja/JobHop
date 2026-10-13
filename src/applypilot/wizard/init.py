@@ -79,6 +79,24 @@ def _setup_resume() -> None:
 # Profile
 # ---------------------------------------------------------------------------
 
+def _split_list(value: str) -> list[str]:
+    """Split wizard lists on semicolons so commas remain part of values."""
+    return [item.strip() for item in value.split(";") if item.strip()]
+
+
+def _parse_salary_range(value: str) -> tuple[str, str]:
+    """Parse a closed range or an open-ended minimum from the wizard."""
+    value = value.strip()
+    if not value:
+        return "", ""
+    if value.endswith("+"):
+        return value[:-1].strip(), ""
+    if "-" in value:
+        lower, upper = value.split("-", 1)
+        return lower.strip(), upper.strip()
+    return value, value
+
+
 def _setup_profile() -> dict:
     """Walk through profile questions and return a nested profile dict."""
     console.print(Panel("[bold]Step 2: Profile[/bold]\nTell JobHop about yourself. This powers scoring, tailoring, and auto-fill."))
@@ -115,15 +133,18 @@ def _setup_profile() -> dict:
 
     # -- Compensation --
     console.print("\n[bold cyan]Compensation[/bold cyan]")
-    salary = Prompt.ask("Expected annual salary (number)", default="")
+    salary = Prompt.ask("Expected annual salary (digits only, e.g. 80000)", default="")
     salary_currency = Prompt.ask("Currency", default="USD")
-    salary_range = Prompt.ask("Acceptable range (e.g. 80000-120000)", default="")
-    range_parts = salary_range.split("-") if "-" in salary_range else [salary, salary]
+    salary_range = Prompt.ask(
+        "Acceptable range (e.g. 80000-120000 or 80000+; leave blank if unsure)",
+        default="",
+    )
+    range_min, range_max = _parse_salary_range(salary_range)
     profile["compensation"] = {
         "salary_expectation": salary,
         "salary_currency": salary_currency,
-        "salary_range_min": range_parts[0].strip(),
-        "salary_range_max": range_parts[1].strip() if len(range_parts) > 1 else range_parts[0].strip(),
+        "salary_range_min": range_min,
+        "salary_range_max": range_max,
     }
 
     # -- Experience --
@@ -138,28 +159,28 @@ def _setup_profile() -> dict:
     }
 
     # -- Skills Boundary --
-    console.print("\n[bold cyan]Skills[/bold cyan] (comma-separated)")
-    langs = Prompt.ask("Programming languages", default="")
-    frameworks = Prompt.ask("Frameworks & libraries", default="")
-    tools = Prompt.ask("Tools & platforms (e.g. Docker, AWS, Git)", default="")
+    console.print("\n[bold cyan]Skills[/bold cyan] (semicolon-separated entries)")
+    langs = Prompt.ask("Programming languages (separate entries with semicolons)", default="")
+    frameworks = Prompt.ask("Frameworks & libraries (separate entries with semicolons)", default="")
+    tools = Prompt.ask("Tools & platforms (separate entries with semicolons)", default="")
     profile["skills_boundary"] = {
-        "programming_languages": [s.strip() for s in langs.split(",") if s.strip()],
-        "frameworks": [s.strip() for s in frameworks.split(",") if s.strip()],
-        "tools": [s.strip() for s in tools.split(",") if s.strip()],
+        "programming_languages": _split_list(langs),
+        "frameworks": _split_list(frameworks),
+        "tools": _split_list(tools),
     }
 
     # -- Resume Facts (preserved truths for tailoring) --
     console.print("\n[bold cyan]Resume Facts[/bold cyan]")
     console.print("[dim]These are preserved exactly during resume tailoring — the AI will never change them.[/dim]")
-    companies = Prompt.ask("Companies to always keep (comma-separated)", default="")
-    projects = Prompt.ask("Projects to always keep (comma-separated)", default="")
-    school = Prompt.ask("School name(s) to preserve", default="")
-    metrics = Prompt.ask("Real metrics to preserve (e.g. '99.9% uptime, 50k users')", default="")
+    companies = Prompt.ask("Companies to always keep (separate entries with semicolons)", default="")
+    projects = Prompt.ask("Projects to always keep (separate entries with semicolons)", default="")
+    school = Prompt.ask("School name(s) to preserve (separate entries with semicolons)", default="")
+    metrics = Prompt.ask("Real metrics to preserve (e.g. '99.9% uptime; 50k users')", default="")
     profile["resume_facts"] = {
-        "preserved_companies": [s.strip() for s in companies.split(",") if s.strip()],
-        "preserved_projects": [s.strip() for s in projects.split(",") if s.strip()],
+        "preserved_companies": _split_list(companies),
+        "preserved_projects": _split_list(projects),
         "preserved_school": school.strip(),
-        "real_metrics": [s.strip() for s in metrics.split(",") if s.strip()],
+        "real_metrics": _split_list(metrics),
     }
 
     # -- EEO Voluntary (defaults) --
