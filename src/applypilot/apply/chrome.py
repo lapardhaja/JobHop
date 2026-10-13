@@ -208,6 +208,17 @@ def launch_chrome(worker_id: int, port: int | None = None,
     if port is None:
         port = BASE_CDP_PORT + worker_id
 
+    # Never overwrite tracking for a worker whose prior process or temporary
+    # profile could not be cleaned up.
+    with _chrome_lock:
+        previous_process = _chrome_procs.get(worker_id)
+        has_temporary_profile = worker_id in _temporary_profiles
+    if previous_process or has_temporary_profile:
+        cleanup_worker(worker_id, previous_process)
+        with _chrome_lock:
+            if worker_id in _chrome_procs or worker_id in _temporary_profiles:
+                raise RuntimeError("Previous Chrome worker could not be fully cleaned up.")
+
     if initial_url:
         parsed_url = urlsplit(initial_url)
         if (
@@ -288,17 +299,36 @@ def cleanup_worker(worker_id: int, process: subprocess.Popen | None) -> None:
         worker_id: Numeric worker identifier.
         process: The Popen handle returned by launch_chrome.
     """
+    with _chrome_lock:
+        process = process or _chrome_procs.get(worker_id)
     if process and process.poll() is None:
         _kill_process_tree(process.pid)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             pass
+    if process and process.poll() is None:
+        logger.warning(
+            "[worker-%d] Chrome did not exit; retaining its temporary profile for cleanup: %s",
+            worker_id, _temporary_profiles.get(worker_id),
+        )
+        return
     with _chrome_lock:
         _chrome_procs.pop(worker_id, None)
-        temporary_profile = _temporary_profiles.pop(worker_id, None)
+        temporary_profile = _temporary_profiles.get(worker_id)
     if temporary_profile:
         shutil.rmtree(temporary_profile, ignore_errors=True)
+        if temporary_profile.exists():
+            logger.warning(
+                "[worker-%d] Could not remove temporary Chrome profile; retaining it for retry: %s",
+                worker_id, temporary_profile,
+            )
+        else:
+            with _chrome_lock:
+                _temporary_profiles.pop(worker_id, None)
+    else:
+        with _chrome_lock:
+            _temporary_profiles.pop(worker_id, None)
     logger.info("[worker-%d] Chrome cleaned up", worker_id)
 
 
@@ -308,21 +338,12 @@ def kill_all_chrome() -> None:
     Called during graceful shutdown to ensure no orphan Chrome processes.
     """
     with _chrome_lock:
-        procs = dict(_chrome_procs)
-        _chrome_procs.clear()
-        temporary_profiles = dict(_temporary_profiles)
-        _temporary_profiles.clear()
+        workers = set(_chrome_procs) | set(_temporary_profiles)
 
-    for wid, proc in procs.items():
-        if proc.poll() is None:
-            _kill_process_tree(proc.pid)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
+    for wid in workers:
+        cleanup_worker(wid, None)
         _kill_on_port(BASE_CDP_PORT + wid)
-    for profile_dir in temporary_profiles.values():
-        shutil.rmtree(profile_dir, ignore_errors=True)
+        cleanup_worker(wid, None)
 
     # Sweep base port in case of zombies
     _kill_on_port(BASE_CDP_PORT)
@@ -348,26 +369,5 @@ def reset_worker_dir(worker_id: int) -> Path:
 
 
 def cleanup_on_exit() -> None:
-    """Atexit handler: kill all Chrome processes and sweep CDP ports.
-
-    Register this with atexit.register() at application startup.
-    """
-    with _chrome_lock:
-        procs = dict(_chrome_procs)
-        _chrome_procs.clear()
-        temporary_profiles = dict(_temporary_profiles)
-        _temporary_profiles.clear()
-
-    for wid, proc in procs.items():
-        if proc.poll() is None:
-            _kill_process_tree(proc.pid)
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                pass
-        _kill_on_port(BASE_CDP_PORT + wid)
-    for profile_dir in temporary_profiles.values():
-        shutil.rmtree(profile_dir, ignore_errors=True)
-
-    # Sweep base port for any orphan
-    _kill_on_port(BASE_CDP_PORT)
+    """Atexit handler to retry cleanup of tracked Chrome workers."""
+    kill_all_chrome()
