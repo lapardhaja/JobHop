@@ -77,6 +77,7 @@ def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
         f"--viewport-size={config.DEFAULTS['viewport']}",
     ]
     gmail_args = ["-y", "@gongrzhe/server-gmail-autoauth-mcp"]
+    playwright_approval_mode = "auto" if dry_run else "approve"
     # Retain the upstream Gmail MCP's mail-mutation restrictions. Read/search
     # tools remain available for verification flows; dry-run prompts forbid sends.
     gmail_tools = [
@@ -94,7 +95,7 @@ def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
     overrides = [
         'mcp_servers.playwright.command="npx"',
         f"mcp_servers.playwright.args={json.dumps(playwright_args)}",
-        'mcp_servers.playwright.default_tools_approval_mode="auto"',
+        f'mcp_servers.playwright.default_tools_approval_mode="{playwright_approval_mode}"',
         'mcp_servers.gmail.command="npx"',
         f"mcp_servers.gmail.args={json.dumps(gmail_args)}",
         f"mcp_servers.gmail.disabled_tools={json.dumps(gmail_tools)}",
@@ -109,7 +110,6 @@ def _codex_mcp_overrides(cdp_port: int, *, dry_run: bool = False) -> list[str]:
             # the explicitly allowlisted Playwright inspection tools.
             "features.shell_tool=false",
             "features.multi_agent=false",
-            "features.browser_use=false",
             "features.browser_use_external=false",
             "features.computer_use=false",
             "features.apps=false",
@@ -697,6 +697,7 @@ def run_job(job: dict, port: int, worker_id: int = 0,
 
     start = time.time()
     result_data: CodexResult | None = None
+    browser_snapshot_succeeded = False
 
     def _track_process(proc: subprocess.Popen | None) -> None:
         with _codex_lock:
@@ -706,12 +707,20 @@ def run_job(job: dict, port: int, worker_id: int = 0,
                 _codex_procs[worker_id] = proc
 
     def _handle_event(event: dict) -> None:
+        nonlocal browser_snapshot_succeeded
         if event.get("type") != "item.completed":
             return
         item = event.get("item")
         if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
             return
-        name = item.get("name") or item.get("tool") or "MCP tool"
+        tool_name = item.get("name") or item.get("tool") or "MCP tool"
+        if (
+            item.get("server") == "playwright"
+            and tool_name == "browser_snapshot"
+            and item.get("status") == "completed"
+        ):
+            browser_snapshot_succeeded = True
+        name = tool_name
         server = item.get("server")
         if server:
             name = f"{server}:{name}"
@@ -782,6 +791,14 @@ def run_job(job: dict, port: int, worker_id: int = 0,
             return re.sub(r'[*`"]+$', '', s).strip()
 
         if "RESULT:DRY_RUN" in output:
+            if not dry_run:
+                add_event(f"[W{worker_id}] Unexpected preview result in live run")
+                update_state(worker_id, status="failed", last_action="unexpected preview result")
+                return "failed:unexpected_dry_run_result", duration_ms
+            if not browser_snapshot_succeeded:
+                add_event(f"[W{worker_id}] Preview did not successfully inspect the page")
+                update_state(worker_id, status="failed", last_action="browser inspection missing")
+                return "failed:dry_run_browser_inspection_missing", duration_ms
             add_event(f"[W{worker_id}] PREVIEW COMPLETE: {job['title'][:34]}")
             update_state(worker_id, status="dry_run", last_action="preview complete")
             return "dry_run", duration_ms
