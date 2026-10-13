@@ -201,26 +201,59 @@ def get_tier() -> int:
     """Detect the current tier based on available dependencies.
 
     Tier 1 (Discovery):            Python + pip
-    Tier 2 (AI Scoring & Tailoring): + LLM API key
-    Tier 3 (Full Auto-Apply):       + Claude Code CLI + Chrome
+    Tier 2 (AI Scoring & Tailoring): + selected Codex or API text backend
+    Tier 3 (Full Auto-Apply):       + signed-in Codex CLI + Chrome + Node/npx
     """
     load_env()
 
-    has_llm = any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
-    if not has_llm:
+    try:
+        provider = get_ai_provider()
+    except ValueError:
         return 1
 
-    has_claude = shutil.which("claude") is not None
+    if provider == "codex":
+        has_text_backend = _codex_ready()
+    else:
+        has_text_backend = _api_backend_configured()
+    if not has_text_backend:
+        return 1
+
+    if not _codex_ready() or not shutil.which("npx"):
+        return 2
     try:
         get_chrome_path()
-        has_chrome = True
     except FileNotFoundError:
-        has_chrome = False
+        return 2
+    return 3
 
-    if has_claude and has_chrome:
-        return 3
 
-    return 2
+def get_ai_provider() -> str:
+    """Return the explicitly selected text backend, defaulting to Codex."""
+    provider = os.environ.get("APPLYPILOT_AI_PROVIDER", "codex").strip().lower()
+    if provider not in {"codex", "api"}:
+        raise ValueError("APPLYPILOT_AI_PROVIDER must be 'codex' or 'api'.")
+    return provider
+
+
+def _api_backend_configured() -> bool:
+    """Whether the explicit API backend has at least one configured provider."""
+    return any(os.environ.get(key) for key in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL"))
+
+
+def _codex_status() -> tuple[str | None, bool, str]:
+    """Return Codex executable, login state, and a credential-free message."""
+    from applypilot.codex import codex_login_status, find_codex_cli
+
+    executable = find_codex_cli()
+    if not executable:
+        return None, False, "Codex CLI not found on PATH."
+    signed_in, message = codex_login_status(executable)
+    return executable, signed_in, message
+
+
+def _codex_ready() -> bool:
+    executable, signed_in, _ = _codex_status()
+    return bool(executable and signed_in)
 
 
 def check_tier(required: int, feature: str) -> None:
@@ -238,15 +271,39 @@ def check_tier(required: int, feature: str) -> None:
     _console = Console(stderr=True)
 
     missing: list[str] = []
-    if required >= 2 and not any(os.environ.get(k) for k in ("GEMINI_API_KEY", "OPENAI_API_KEY", "LLM_URL")):
-        missing.append("LLM API key — run [bold]applypilot init[/bold] or set GEMINI_API_KEY")
+    try:
+        provider = get_ai_provider()
+    except ValueError as exc:
+        provider = ""
+        missing.append(str(exc))
+
+    if required >= 2 and provider == "codex":
+        executable, signed_in, _ = _codex_status()
+        if not executable:
+            missing.append("Codex CLI — install it and make sure `codex` is on PATH")
+        elif not signed_in:
+            missing.append("Codex sign-in — run [bold]codex login[/bold]")
+    elif required >= 2 and provider == "api" and not _api_backend_configured():
+        missing.append(
+            "API provider — add GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL to the ApplyPilot .env file"
+        )
+
     if required >= 3:
-        if not shutil.which("claude"):
-            missing.append("Claude Code CLI — install from [bold]https://claude.ai/code[/bold]")
+        executable, signed_in, _ = _codex_status()
+        if not executable:
+            missing.append("Codex CLI — install it and make sure `codex` is on PATH")
+        elif not signed_in:
+            missing.append("Codex sign-in — run [bold]codex login[/bold]")
         try:
             get_chrome_path()
         except FileNotFoundError:
             missing.append("Chrome/Chromium — install or set CHROME_PATH")
+        if not shutil.which("npx"):
+            missing.append("Node.js and npx — install Node.js 18+ and make sure `npx` is on PATH")
+
+    # Keep the prerequisite summary readable when Tier 3 also requires the
+    # same Codex backend checked for Tier 2.
+    missing = list(dict.fromkeys(missing))
 
     _console.print(
         f"\n[red]'{feature}' requires {TIER_LABELS.get(required, f'Tier {required}')} (Tier {required}).[/red]\n"

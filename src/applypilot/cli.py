@@ -378,31 +378,53 @@ def doctor() -> None:
         results.append(("python-jobspy", warn_mark,
                         "pip install --no-deps python-jobspy && pip install pydantic tls-client requests markdownify regex"))
 
-    # --- Tier 2 checks ---
+    # --- Selected text backend ---
     import os
+    from applypilot import config as app_config
+
     has_gemini = bool(os.environ.get("GEMINI_API_KEY"))
     has_openai = bool(os.environ.get("OPENAI_API_KEY"))
     has_local = bool(os.environ.get("LLM_URL"))
-    if has_gemini:
-        model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
-        results.append(("LLM API key", ok_mark, f"Gemini ({model})"))
-    elif has_openai:
-        model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
-        results.append(("LLM API key", ok_mark, f"OpenAI ({model})"))
-    elif has_local:
-        results.append(("LLM API key", ok_mark, f"Local: {os.environ.get('LLM_URL')}"))
+    try:
+        provider = app_config.get_ai_provider()
+    except ValueError as exc:
+        provider = ""
+        results.append(("AI provider", fail_mark, str(exc)))
+
+    if provider == "codex":
+        model = os.environ.get("CODEX_MODEL") or "Codex CLI default"
+        results.append(("AI backend", ok_mark, f"Codex CLI ({model})"))
+    elif provider == "api":
+        if has_gemini and not has_local:
+            model = os.environ.get("LLM_MODEL", "gemini-2.0-flash")
+            results.append(("API backend", ok_mark, f"Gemini ({model}); API key configured"))
+        elif has_openai and not has_local:
+            model = os.environ.get("LLM_MODEL", "gpt-4o-mini")
+            results.append(("API backend", ok_mark, f"OpenAI ({model}); API key configured"))
+        elif has_local:
+            model = os.environ.get("LLM_MODEL", "local-model")
+            results.append(("API backend", ok_mark, f"Local API-compatible provider ({model}) configured"))
+        else:
+            results.append(("API backend", fail_mark,
+                            "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in ~/.applypilot/.env"))
     else:
-        results.append(("LLM API key", fail_mark,
-                        "Set GEMINI_API_KEY in ~/.applypilot/.env (run 'applypilot init')"))
+        results.append(("AI backend", fail_mark, "Correct APPLYPILOT_AI_PROVIDER in ~/.applypilot/.env"))
 
     # --- Tier 3 checks ---
-    # Claude Code CLI
-    claude_bin = shutil.which("claude")
-    if claude_bin:
-        results.append(("Claude Code CLI", ok_mark, claude_bin))
+    codex_bin, codex_signed_in, codex_message = app_config._codex_status()
+    if codex_bin:
+        results.append(("Codex CLI", ok_mark, codex_bin))
+        results.append(("Codex sign-in", ok_mark if codex_signed_in else fail_mark, codex_message))
     else:
-        results.append(("Claude Code CLI", fail_mark,
-                        "Install from https://claude.ai/code (needed for auto-apply)"))
+        results.append(("Codex CLI", fail_mark, "Install Codex CLI and make sure `codex` is on PATH"))
+        results.append(("Codex sign-in", warn_mark, "Run `codex login` after installing Codex CLI"))
+
+    if provider == "api":
+        results.append(("Codex auto-apply", ok_mark if codex_signed_in else fail_mark,
+                        "Codex CLI sign-in is required for browser auto-apply"))
+    elif provider == "codex":
+        results.append(("API mode", "[dim]optional[/dim]",
+                        "Set APPLYPILOT_AI_PROVIDER=api and configure an API provider to use APIs"))
 
     # Chrome
     try:
@@ -445,10 +467,10 @@ def doctor() -> None:
     console.print(f"[bold]Current tier: Tier {tier} — {TIER_LABELS[tier]}[/bold]")
 
     if tier == 1:
-        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, cover letters (needs LLM API key)[/dim]")
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 2 unlocks: scoring, tailoring, and cover letters (Codex sign-in or explicit API setup)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (Codex sign-in + Chrome + Node.js/npx)[/dim]")
     elif tier == 2:
-        console.print("[dim]  → Tier 3 unlocks: auto-apply (needs Claude Code CLI + Chrome + Node.js)[/dim]")
+        console.print("[dim]  → Tier 3 unlocks: auto-apply (Codex sign-in + Chrome + Node.js/npx)[/dim]")
 
     console.print()
 
