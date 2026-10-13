@@ -1,12 +1,7 @@
-"""
-Unified LLM client for ApplyPilot.
+"""Unified text-generation client for ApplyPilot.
 
-Auto-detects provider from environment:
-  GEMINI_API_KEY  -> Google Gemini (default: gemini-2.0-flash)
-  OPENAI_API_KEY  -> OpenAI (default: gpt-4o-mini)
-  LLM_URL         -> Local llama.cpp / Ollama compatible endpoint
-
-LLM_MODEL env var overrides the model name for any provider.
+Codex CLI is the default provider. Set ``APPLYPILOT_AI_PROVIDER=api`` to
+explicitly use the existing Gemini, OpenAI, or OpenAI-compatible API client.
 """
 
 import logging
@@ -14,6 +9,8 @@ import os
 import time
 
 import httpx
+
+from applypilot.codex import run_codex_exec
 
 log = logging.getLogger(__name__)
 
@@ -54,7 +51,7 @@ def _detect_provider() -> tuple[str, str, str]:
         )
 
     raise RuntimeError(
-        "No LLM provider configured. "
+        "API mode is selected, but no API provider is configured. "
         "Set GEMINI_API_KEY, OPENAI_API_KEY, or LLM_URL in your environment."
     )
 
@@ -273,6 +270,58 @@ class LLMClient:
         self._client.close()
 
 
+class CodexClient:
+    """Compatibility client that sends chat messages to the Codex CLI."""
+
+    def __init__(self, model: str | None = None) -> None:
+        self.model = model
+
+    @staticmethod
+    def _transcript(messages: list[dict]) -> str:
+        sections: list[str] = []
+        for message in messages:
+            role = str(message.get("role", "user")).strip().upper()
+            content = message.get("content", "")
+            if not isinstance(content, str):
+                content = str(content)
+            sections.append(f"[{role}]\n{content}")
+        return (
+            "Respond to the conversation below as the assistant. Follow its system "
+            "instructions and return only the assistant response, without repeating "
+            "the transcript or adding a role label.\n\n"
+            + "\n\n".join(sections)
+            + "\n\n[ASSISTANT]\n"
+        )
+
+    def chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Send a role-labeled transcript through Codex and return final text.
+
+        ``temperature`` and ``max_tokens`` remain accepted for compatibility
+        with ApplyPilot's shared API-provider interface. Codex CLI does not
+        offer equivalent per-invocation controls, so these values are not
+        enforced in Codex mode.
+        """
+        del temperature, max_tokens
+        result = run_codex_exec(
+            self._transcript(messages),
+            model=self.model,
+            timeout_s=_TIMEOUT,
+        )
+        return result.final_text
+
+    def ask(self, prompt: str, **kwargs) -> str:
+        """Convenience: single user prompt -> assistant response."""
+        return self.chat([{"role": "user", "content": prompt}], **kwargs)
+
+    def close(self) -> None:
+        """No persistent Codex process or client needs closing."""
+
+
 class _GeminiCompatForbidden(Exception):
     """Sentinel: Gemini OpenAI-compat returned 403. Switch to native API."""
     def __init__(self, response: httpx.Response) -> None:
@@ -284,14 +333,24 @@ class _GeminiCompatForbidden(Exception):
 # Singleton
 # ---------------------------------------------------------------------------
 
-_instance: LLMClient | None = None
+_instance: LLMClient | CodexClient | None = None
 
 
-def get_client() -> LLMClient:
-    """Return (or create) the module-level LLMClient singleton."""
+def get_client() -> LLMClient | CodexClient:
+    """Return (or create) the module-level provider client singleton."""
     global _instance
     if _instance is None:
-        base_url, model, api_key = _detect_provider()
-        log.info("LLM provider: %s  model: %s", base_url, model)
-        _instance = LLMClient(base_url, model, api_key)
+        provider = os.environ.get("APPLYPILOT_AI_PROVIDER", "codex").strip().lower()
+        if provider == "codex":
+            model = os.environ.get("CODEX_MODEL") or None
+            log.info("LLM provider: Codex CLI  model: %s", model or "Codex default")
+            _instance = CodexClient(model)
+        elif provider == "api":
+            base_url, model, api_key = _detect_provider()
+            log.info("LLM provider: API (%s)  model: %s", base_url, model)
+            _instance = LLMClient(base_url, model, api_key)
+        else:
+            raise RuntimeError(
+                "Invalid APPLYPILOT_AI_PROVIDER value. Choose 'codex' (default) or 'api'."
+            )
     return _instance
