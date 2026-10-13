@@ -1,7 +1,7 @@
 # ApplyPilot Codex Backend Design
 
 **Date:** 2026-10-13
-**Status:** Draft for review
+**Status:** Approved
 **Source:** ApplyPilot 0.3.0 (`Pickle-Pixel/ApplyPilot`, AGPL-3.0-only)
 
 ## Goal
